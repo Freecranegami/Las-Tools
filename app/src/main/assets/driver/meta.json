@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "name": "Turnip-v26.1.0-R4",
+  "description": "Mesa Main",
+  "author": "StevenMX",
+  "packageVersion": "1",
+  "vendor": "Mesa",
+  "driverVersion": "Vulkan 1.4.344",
+  "minApi": 28,
+  "libraryName": "vulkan.ad07XX.so"
+}
