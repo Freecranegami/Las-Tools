@@ -11,9 +11,19 @@ android {
         applicationId = "com.freecrane.adrenotest"
         minSdk = 26
         targetSdk = 28          // low on purpose: keeps native-library loading permissive
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
         ndk { abiFilters += "arm64-v8a" }
+    }
+
+    // Same key on every build, so new APKs install over old ones.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     externalNativeBuild {

@@ -29,12 +29,21 @@ object Native {
     ): String
 }
 
+// A library that links libvulkan.so like a game would. Loaded on demand, so we control
+// whether the custom driver was opened before it was loaded.
+object Guest {
+    fun load() { System.loadLibrary("guesttest") }
+    external fun vulkanInfo(): String
+}
+
 class MainActivity : Activity() {
 
     private var surface: Surface? = null
 
     @Volatile
     private var busy = false
+    private var customOpened = false
+    private var guestLoaded = false
 
     private fun installDriver(): Pair<File, String> {
         val dir = File(filesDir, "driver").apply { mkdirs() }
@@ -71,6 +80,7 @@ class MainActivity : Activity() {
     private fun runProbe(custom: Boolean, out: TextView) {
         if (busy) { out.text = "Busy, wait for the current test to finish"; return }
         val p = paths(custom)
+        if (custom) customOpened = true
         out.text = Native.probe(p[0], p[1], p[2], p[3], custom)
     }
 
@@ -82,6 +92,7 @@ class MainActivity : Activity() {
             return
         }
         val p = paths(custom)
+        if (custom) customOpened = true
         busy = true
         out.text = "Rendering..."
         Thread {
@@ -93,6 +104,47 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun linkedTest(custom: Boolean, out: TextView) {
+        if (busy) { out.text = "Busy, wait for the current test to finish"; return }
+        if (guestLoaded) {
+            out.text = "The linked test already ran in this launch.\n" +
+                "Fully close and reopen the app to run the other mode."
+            return
+        }
+        if (!custom && customOpened) {
+            out.text = "The custom driver was already opened in this launch, " +
+                "so this control would be misleading.\n" +
+                "Fully close and reopen the app, then press Linked: system first."
+            return
+        }
+        if (custom) {
+            val p = paths(true)
+            Native.probe(p[0], p[1], p[2], p[3], true)   // opens the custom driver
+            customOpened = true
+        }
+        Guest.load()
+        guestLoaded = true
+        val label = if (custom) "[custom driver opened first]" else "[system only]"
+        out.text = label + "\n" + Guest.vulkanInfo()
+    }
+
+    private fun btn(label: String, onClick: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            isAllCaps = false
+            textSize = 12f
+            setOnClickListener { onClick() }
+        }
+
+    private fun row(vararg buttons: Button): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            for (b in buttons) {
+                addView(b, LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -100,15 +152,6 @@ class MainActivity : Activity() {
             textSize = 14f
             setTextIsSelectable(true)
         }
-        val probeSys = Button(this).apply { text = "Probe system driver" }
-        val probeCus = Button(this).apply { text = "Probe custom driver" }
-        val renderSys = Button(this).apply { text = "Render test (system driver)" }
-        val renderCus = Button(this).apply { text = "Render test (custom driver)" }
-
-        probeSys.setOnClickListener { runProbe(false, out) }
-        probeCus.setOnClickListener { runProbe(true, out) }
-        renderSys.setOnClickListener { runRender(false, out) }
-        renderCus.setOnClickListener { runRender(true, out) }
 
         val sv = SurfaceView(this)
         sv.holder.addCallback(object : SurfaceHolder.Callback {
@@ -119,11 +162,16 @@ class MainActivity : Activity() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 40, 24, 24)
-            addView(probeSys)
-            addView(probeCus)
-            addView(renderSys)
-            addView(renderCus)
+            setPadding(16, 32, 16, 16)
+            addView(row(
+                btn("Probe: system") { runProbe(false, out) },
+                btn("Probe: custom") { runProbe(true, out) }))
+            addView(row(
+                btn("Render: system") { runRender(false, out) },
+                btn("Render: custom") { runRender(true, out) }))
+            addView(row(
+                btn("Linked: system") { linkedTest(false, out) },
+                btn("Linked: custom") { linkedTest(true, out) }))
             addView(out)
             addView(sv, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
