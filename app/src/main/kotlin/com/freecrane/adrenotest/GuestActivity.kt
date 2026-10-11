@@ -64,12 +64,14 @@ class GuestActivity : Activity() {
         val libDir = File(root, "lib")
         if (!apk.exists()) throw IllegalStateException("game not imported: $pkg")
 
+        Log.i(logTag, "launch step 1")
         // 1. Shim next to the game's libraries, then open the custom driver.
         Util.ensureShim(app, libDir)
         val p = Util.paths(app, true)
         val status = Native.openCustom(p[0], p[1], p[2], p[3])
         if (status != "custom driver open") throw IllegalStateException(status)
 
+        Log.i(logTag, "launch step 2")
         // 2. Describe the game to the system.
         val pi = packageManager.getPackageArchiveInfo(apk.path, 0)
             ?: throw IllegalStateException("can't read the game's APK")
@@ -80,6 +82,7 @@ class GuestActivity : Activity() {
         ai.dataDir = File(filesDir, "guestdata/$pkg").apply { mkdirs() }.path
         val res = packageManager.getResourcesForApplication(ai)
 
+        Log.i(logTag, "launch step 3")
         // 3. Load the game's Java code. Its parent is the system loader only, so our
         //    own classes stay hidden from the game.
         apk.setReadOnly()
@@ -94,13 +97,16 @@ class GuestActivity : Activity() {
         guestLoader = loader
         ready = true
 
+        Log.i(logTag, "launch step 4")
         // 4. Start the game.
         val obj = createPlayer()
         player = obj
+        Log.i(logTag, "player object created")
         val view: View = (obj as? View)
             ?: (obj.javaClass.getMethod("getFrameLayout").invoke(obj) as View)
         setContentView(view)
         view.requestFocus()
+        Log.i(logTag, "game view attached")
     }
 
     private fun createPlayer(): Any {

@@ -381,7 +381,8 @@ class MainActivity : Activity() {
                 btn("Launch game") { launchGame() }))
             addView(row(
                 btn("Show log") { showLog() },
-                btn("Copy log") { copyLog() }))
+                btn("Copy log") { copyLog() },
+                btn("Guest log") { GuestLog.copy(this@MainActivity, out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))
