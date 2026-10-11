@@ -27,10 +27,11 @@ object Native {
         driverDir: String, driverName: String,
         custom: Boolean
     ): String
+
+    external fun bindShim(): String
 }
 
-// A library that links libvulkan.so like a game would. Loaded on demand, so we control
-// whether the custom driver was opened before it was loaded.
+// A library that links libvulkan.so like a game would.
 object Guest {
     fun load() { System.loadLibrary("guesttest") }
     external fun vulkanInfo(): String
@@ -77,6 +78,34 @@ class MainActivity : Activity() {
         }
     }
 
+    // Copies a native library, renaming its reference to libvulkan.so into
+    // libvkshim.so (both 12 bytes). Returns how many references were renamed.
+    private fun patchVulkanName(src: File, dst: File): Int {
+        val data = src.readBytes()
+        val from = "libvulkan.so".toByteArray()
+        val to = "libvkshim.so".toByteArray()
+        var count = 0
+        var i = 0
+        val last = data.size - from.size
+        while (i <= last) {
+            if (data[i] == from[0]) {
+                var match = true
+                for (j in 1 until from.size) {
+                    if (data[i + j] != from[j]) { match = false; break }
+                }
+                if (match) {
+                    System.arraycopy(to, 0, data, i, to.size)
+                    count++
+                    i += from.size
+                    continue
+                }
+            }
+            i++
+        }
+        dst.writeBytes(data)
+        return count
+    }
+
     private fun runProbe(custom: Boolean, out: TextView) {
         if (busy) { out.text = "Busy, wait for the current test to finish"; return }
         val p = paths(custom)
@@ -107,8 +136,8 @@ class MainActivity : Activity() {
     private fun linkedTest(custom: Boolean, out: TextView) {
         if (busy) { out.text = "Busy, wait for the current test to finish"; return }
         if (guestLoaded) {
-            out.text = "The linked test already ran in this launch.\n" +
-                "Fully close and reopen the app to run the other mode."
+            out.text = "A linked test already ran in this launch.\n" +
+                "Fully close and reopen the app to run another one."
             return
         }
         if (!custom && customOpened) {
@@ -126,6 +155,32 @@ class MainActivity : Activity() {
         guestLoaded = true
         val label = if (custom) "[custom driver opened first]" else "[system only]"
         out.text = label + "\n" + Guest.vulkanInfo()
+    }
+
+    private fun linkedShim(out: TextView) {
+        if (busy) { out.text = "Busy, wait for the current test to finish"; return }
+        if (guestLoaded) {
+            out.text = "A linked test already ran in this launch.\n" +
+                "Fully close and reopen the app to run another one."
+            return
+        }
+        try {
+            val p = paths(true)
+            Native.probe(p[0], p[1], p[2], p[3], true)   // opens the custom driver
+            customOpened = true
+            val bound = Native.bindShim()
+
+            val src = File(applicationInfo.nativeLibraryDir, "libguesttest.so")
+            val dir = File(filesDir, "guestlibs").apply { mkdirs() }
+            val dst = File(dir, "libguesttest.so")
+            val patched = patchVulkanName(src, dst)
+
+            System.load(dst.absolutePath)
+            guestLoaded = true
+            out.text = "[shim]\n$bound\nrenamed $patched reference(s)\n" + Guest.vulkanInfo()
+        } catch (e: Throwable) {
+            out.text = "Shim test failed: $e"
+        }
     }
 
     private fun btn(label: String, onClick: () -> Unit): Button =
@@ -171,7 +226,8 @@ class MainActivity : Activity() {
                 btn("Render: custom") { runRender(true, out) }))
             addView(row(
                 btn("Linked: system") { linkedTest(false, out) },
-                btn("Linked: custom") { linkedTest(true, out) }))
+                btn("Linked: custom") { linkedTest(true, out) },
+                btn("Linked: shim") { linkedShim(out) }))
             addView(out)
             addView(sv, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))

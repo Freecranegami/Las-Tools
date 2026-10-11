@@ -399,3 +399,28 @@ Java_com_freecrane_adrenotest_Native_render(JNIEnv *env, jobject thiz,
     (*env)->ReleaseStringUTFChars(env, jname, name);
     return (*env)->NewStringUTF(env, out);
 }
+
+/* Loads libvkshim.so and points all its stubs at the custom-driver loader. */
+JNIEXPORT jstring JNICALL
+Java_com_freecrane_adrenotest_Native_bindShim(JNIEnv *env, jobject thiz) {
+    char out[256];
+
+    if (!g_custom) {
+        snprintf(out, sizeof out, "custom driver is not open");
+        return (*env)->NewStringUTF(env, out);
+    }
+    void *shim = dlopen("libvkshim.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!shim) {
+        snprintf(out, sizeof out, "dlopen libvkshim.so failed: %s", dlerror());
+        return (*env)->NewStringUTF(env, out);
+    }
+    int (*bind)(void *) = (int (*)(void *))dlsym(shim, "vkshim_bind");
+    int (*total)(void) = (int (*)(void))dlsym(shim, "vkshim_total");
+    if (!bind || !total) {
+        snprintf(out, sizeof out, "shim is missing its bind functions");
+        return (*env)->NewStringUTF(env, out);
+    }
+    int ok = bind(g_custom);
+    snprintf(out, sizeof out, "shim bound %d of %d functions", ok, total());
+    return (*env)->NewStringUTF(env, out);
+}
