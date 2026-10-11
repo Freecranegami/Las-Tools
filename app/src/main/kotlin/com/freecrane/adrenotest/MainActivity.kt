@@ -1,6 +1,10 @@
 package com.freecrane.adrenotest
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -13,10 +17,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import org.json.JSONObject
 import java.io.File
-import java.io.InputStream
-import java.io.OutputStream
 import java.util.zip.ZipFile
 
 object Native {
@@ -36,6 +37,11 @@ object Native {
     ): String
 
     external fun bindShim(): String
+
+    external fun openCustom(
+        tmpDir: String, hookDir: String,
+        driverDir: String, driverName: String
+    ): String
 }
 
 // A library that links libvulkan.so like a game would.
@@ -56,84 +62,9 @@ class MainActivity : Activity() {
     private var customOpened = false
     private var guestLoaded = false
 
-    private fun installDriver(): Pair<File, String> {
-        val dir = File(filesDir, "driver").apply { mkdirs() }
-        val stamp = packageManager.getPackageInfo(packageName, 0).lastUpdateTime.toString()
-        val marker = File(dir, ".installed")
-
-        // Copy the driver only once per app install. Overwriting a .so that is
-        // already loaded into this process crashes it.
-        if (!marker.exists() || marker.readText() != stamp) {
-            for (n in assets.list("driver") ?: emptyArray()) {
-                assets.open("driver/$n").use { i ->
-                    File(dir, n).outputStream().use { o -> i.copyTo(o) }
-                }
-            }
-            marker.writeText(stamp)
-        }
-
-        val meta = JSONObject(File(dir, "meta.json").readText())
-        return dir to meta.getString("libraryName")
-    }
-
-    // returns [tmpDir, hookDir, driverDir, driverName]
-    private fun paths(custom: Boolean): List<String> {
-        val tmp = File(codeCacheDir, "adreno").apply { mkdirs() }
-        val hook = applicationInfo.nativeLibraryDir
-        return if (custom) {
-            val (dir, name) = installDriver()
-            listOf("$tmp/", "$hook/", "$dir/", name)
-        } else {
-            listOf("$tmp/", "$hook/", "", "")
-        }
-    }
-
-    // Streams input to output, renaming every "libvulkan.so" into "libvkshim.so"
-    // (same length). Returns how many were renamed.
-    private fun copyPatched(input: InputStream, output: OutputStream): Int {
-        val from = "libvulkan.so".toByteArray()
-        val to = "libvkshim.so".toByteArray()
-        val n = from.size
-        val buf = ByteArray(1 shl 20)
-        var filled = 0
-        var count = 0
-        var eof = false
-        while (!eof) {
-            while (filled < buf.size) {
-                val r = input.read(buf, filled, buf.size - filled)
-                if (r < 0) { eof = true; break }
-                filled += r
-            }
-            var i = 0
-            while (i <= filled - n) {
-                if (buf[i] == from[0]) {
-                    var match = true
-                    for (j in 1 until n) {
-                        if (buf[i + j] != from[j]) { match = false; break }
-                    }
-                    if (match) {
-                        System.arraycopy(to, 0, buf, i, n)
-                        count++
-                        i += n
-                        continue
-                    }
-                }
-                i++
-            }
-            val keep = if (eof) 0 else minOf(n - 1, filled)
-            output.write(buf, 0, filled - keep)
-            System.arraycopy(buf, filled - keep, buf, 0, keep)
-            filled = keep
-        }
-        return count
-    }
-
-    private fun patchVulkanName(src: File, dst: File): Int =
-        src.inputStream().use { i -> dst.outputStream().use { o -> copyPatched(i, o) } }
-
     private fun runProbe(custom: Boolean, out: TextView) {
         if (busy) { out.text = "Busy, wait for the current task to finish"; return }
-        val p = paths(custom)
+        val p = Util.paths(this, custom)
         if (custom) customOpened = true
         out.text = Native.probe(p[0], p[1], p[2], p[3], custom)
     }
@@ -145,7 +76,7 @@ class MainActivity : Activity() {
             out.text = "No surface yet"
             return
         }
-        val p = paths(custom)
+        val p = Util.paths(this, custom)
         if (custom) customOpened = true
         busy = true
         out.text = "Rendering..."
@@ -172,7 +103,7 @@ class MainActivity : Activity() {
             return
         }
         if (custom) {
-            val p = paths(true)
+            val p = Util.paths(this, true)
             Native.probe(p[0], p[1], p[2], p[3], true)   // opens the custom driver
             customOpened = true
         }
@@ -190,7 +121,7 @@ class MainActivity : Activity() {
             return
         }
         try {
-            val p = paths(true)
+            val p = Util.paths(this, true)
             Native.probe(p[0], p[1], p[2], p[3], true)   // opens the custom driver
             customOpened = true
             val bound = Native.bindShim()
@@ -198,7 +129,7 @@ class MainActivity : Activity() {
             val src = File(applicationInfo.nativeLibraryDir, "libguesttest.so")
             val dir = File(filesDir, "guestlibs").apply { mkdirs() }
             val dst = File(dir, "libguesttest.so")
-            val patched = patchVulkanName(src, dst)
+            val patched = Util.patchVulkanName(src, dst)
 
             System.load(dst.absolutePath)
             guestLoaded = true
@@ -245,6 +176,8 @@ class MainActivity : Activity() {
     }
 
     private fun doImport(uri: Uri): String {
+        Util.killGuestProcess(this)
+
         val root = File(filesDir, "guests").apply { mkdirs() }
         val tmp = File(root, "incoming.apk")
         contentResolver.openInputStream(uri)!!.use { i ->
@@ -292,7 +225,7 @@ class MainActivity : Activity() {
                         if (parts[1] == "arm64-v8a") {
                             val target = File(libDir, parts[2])
                             val refs = zip.getInputStream(e).use { i ->
-                                target.outputStream().use { o -> copyPatched(i, o) }
+                                target.outputStream().use { o -> Util.copyPatched(i, o) }
                             }
                             extracted++
                             bytes += target.length()
@@ -304,6 +237,7 @@ class MainActivity : Activity() {
                 }
             }
         }
+        if (extracted > 0) Util.ensureShim(this, libDir)
 
         val nativeActivity = pi.activities?.any { it.name == "android.app.NativeActivity" } == true
         val sb = StringBuilder()
@@ -349,6 +283,58 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---------- launching a game ----------
+
+    private fun launchGame() {
+        if (busy) { outView.text = "Busy, wait for the current task to finish"; return }
+        val dirs = File(filesDir, "guests").listFiles { f ->
+            f.isDirectory && File(f, "base.apk").exists()
+        }
+        if (dirs == null || dirs.isEmpty()) {
+            outView.text = "Import a game first."
+            return
+        }
+        val names = dirs.map { it.name }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Launch which game?")
+            .setItems(names) { _, which ->
+                val i = Intent(this, GuestActivity::class.java)
+                i.putExtra("pkg", names[which])
+                i.putExtra("unity", "-force-vulkan")
+                startActivity(i)
+            }
+            .show()
+    }
+
+    // ---------- log viewer ----------
+
+    private fun readLog(lines: Int): String = try {
+        val p = ProcessBuilder("logcat", "-d", "-t", lines.toString())
+            .redirectErrorStream(true).start()
+        p.inputStream.bufferedReader().readText()
+    } catch (e: Throwable) {
+        "Can't read the log: $e"
+    }
+
+    private fun showLog() {
+        outView.text = "Reading log..."
+        Thread {
+            val text = readLog(250)
+            runOnUiThread { outView.text = text }
+        }.start()
+    }
+
+    private fun copyLog() {
+        Thread {
+            val text = readLog(700)
+            runOnUiThread {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("log", text))
+                outView.text = "Copied the last 700 log lines to the clipboard."
+            }
+        }.start()
+    }
+
     // ---------- UI ----------
 
     private fun btn(label: String, onClick: () -> Unit): Button =
@@ -372,7 +358,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         val out = TextView(this).apply {
-            textSize = 14f
+            textSize = 13f
             setTextIsSelectable(true)
         }
         outView = out
@@ -391,7 +377,11 @@ class MainActivity : Activity() {
             setPadding(16, 32, 16, 16)
             addView(row(
                 btn("Import APK") { pickApk() },
-                btn("Imported list") { showImported(out) }))
+                btn("Imported list") { showImported(out) },
+                btn("Launch game") { launchGame() }))
+            addView(row(
+                btn("Show log") { showLog() },
+                btn("Copy log") { copyLog() }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))
@@ -403,7 +393,7 @@ class MainActivity : Activity() {
                 btn("Linked: custom") { linkedTest(true, out) },
                 btn("Linked: shim") { linkedShim(out) }))
             addView(scroller, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 2f))
             addView(sv, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }

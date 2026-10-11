@@ -424,3 +424,33 @@ Java_com_freecrane_adrenotest_Native_bindShim(JNIEnv *env, jobject thiz) {
     snprintf(out, sizeof out, "shim bound %d of %d functions", ok, total());
     return (*env)->NewStringUTF(env, out);
 }
+
+#include <stdlib.h>
+
+/* Opens the custom driver and publishes its handle so the shim can bind itself. */
+JNIEXPORT jstring JNICALL
+Java_com_freecrane_adrenotest_Native_openCustom(JNIEnv *env, jobject thiz,
+                                                jstring jtmp, jstring jhook,
+                                                jstring jdir, jstring jname) {
+    char out[256];
+    const char *tmp  = (*env)->GetStringUTFChars(env, jtmp, NULL);
+    const char *hook = (*env)->GetStringUTFChars(env, jhook, NULL);
+    const char *dir  = (*env)->GetStringUTFChars(env, jdir, NULL);
+    const char *name = (*env)->GetStringUTFChars(env, jname, NULL);
+
+    void *vk = open_vk(tmp, hook, dir, name, 1);
+    if (!vk) {
+        snprintf(out, sizeof out, "open failed: %s", dlerror());
+    } else {
+        char hex[32];
+        snprintf(hex, sizeof hex, "%llx", (unsigned long long)(uintptr_t)vk);
+        setenv("VKSHIM_HANDLE", hex, 1);
+        snprintf(out, sizeof out, "custom driver open");
+    }
+
+    (*env)->ReleaseStringUTFChars(env, jtmp, tmp);
+    (*env)->ReleaseStringUTFChars(env, jhook, hook);
+    (*env)->ReleaseStringUTFChars(env, jdir, dir);
+    (*env)->ReleaseStringUTFChars(env, jname, name);
+    return (*env)->NewStringUTF(env, out);
+}
