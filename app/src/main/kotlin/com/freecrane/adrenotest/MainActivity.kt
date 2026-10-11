@@ -295,12 +295,29 @@ class MainActivity : Activity() {
             return
         }
         val names = dirs.map { it.name }.toTypedArray()
+        if (names.size == 1) {
+            chooseMode(names[0])
+        } else {
+            AlertDialog.Builder(this)
+                .setTitle("Launch which game?")
+                .setItems(names) { _, which -> chooseMode(names[which]) }
+                .show()
+        }
+    }
+
+    private fun chooseMode(pkg: String) {
+        val modes = arrayOf(
+            "1. Vulkan + game's package name",
+            "2. Vulkan + this app's package name",
+            "3. Auto graphics + game's package name",
+            "4. Auto graphics + this app's package name")
         AlertDialog.Builder(this)
-            .setTitle("Launch which game?")
-            .setItems(names) { _, which ->
+            .setTitle("Launch mode")
+            .setItems(modes) { _, which ->
                 val i = Intent(this, GuestActivity::class.java)
-                i.putExtra("pkg", names[which])
-                i.putExtra("unity", "-force-vulkan")
+                i.putExtra("pkg", pkg)
+                i.putExtra("spoofName", which % 2 == 0)
+                if (which < 2) i.putExtra("unity", "-force-vulkan")
                 startActivity(i)
             }
             .show()

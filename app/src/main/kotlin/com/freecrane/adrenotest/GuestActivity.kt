@@ -33,11 +33,12 @@ class GuestActivity : Activity() {
     private lateinit var guestRes: Resources
     private lateinit var guestLoader: ClassLoader
     private var player: Any? = null
+    private var spoofName = true
 
     override fun getResources(): Resources = if (ready) guestRes else super.getResources()
     override fun getAssets(): AssetManager = if (ready) guestRes.assets else super.getAssets()
     override fun getApplicationInfo(): ApplicationInfo = if (ready) guestAi else super.getApplicationInfo()
-    override fun getPackageName(): String = if (ready) guestPkg else super.getPackageName()
+    override fun getPackageName(): String = if (ready && spoofName) guestPkg else super.getPackageName()
     override fun getPackageCodePath(): String = if (ready) guestApk.path else super.getPackageCodePath()
     override fun getClassLoader(): ClassLoader = if (ready) guestLoader else super.getClassLoader()
 
@@ -59,6 +60,8 @@ class GuestActivity : Activity() {
     private fun launchGuest() {
         val app = applicationContext      // always the host app, never overridden
         val pkg = intent.getStringExtra("pkg") ?: throw IllegalStateException("no game chosen")
+        spoofName = intent.getBooleanExtra("spoofName", true)
+        Log.i(logTag, "mode: spoofName=" + spoofName + " unity=" + intent.getStringExtra("unity"))
         val root = File(filesDir, "guests/$pkg")
         val apk = File(root, "base.apk")
         val libDir = File(root, "lib")
