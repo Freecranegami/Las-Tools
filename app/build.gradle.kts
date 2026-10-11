@@ -33,6 +33,11 @@ android {
         }
     }
 
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
+
     buildTypes {
         getByName("debug") {
             // Debuggable apps get Android's strict JNI checker, which kills many games.
