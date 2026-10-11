@@ -2,16 +2,27 @@ package com.freecrane.adrenotest
 
 import android.app.Activity
 import android.os.Bundle
+import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import org.json.JSONObject
 import java.io.File
 
 object Native {
     init { System.loadLibrary("probe") }
+
     external fun probe(
+        tmpDir: String, hookDir: String,
+        driverDir: String, driverName: String,
+        custom: Boolean
+    ): String
+
+    external fun render(
+        surface: Surface,
         tmpDir: String, hookDir: String,
         driverDir: String, driverName: String,
         custom: Boolean
@@ -19,6 +30,8 @@ object Native {
 }
 
 class MainActivity : Activity() {
+
+    private var surface: Surface? = null
 
     private fun installDriver(): Pair<File, String> {
         val dir = File(filesDir, "driver").apply { mkdirs() }
@@ -31,34 +44,71 @@ class MainActivity : Activity() {
         return dir to meta.getString("libraryName")
     }
 
-    private fun runProbe(custom: Boolean): String {
+    // returns [tmpDir, hookDir, driverDir, driverName]
+    private fun paths(custom: Boolean): List<String> {
         val tmp = File(codeCacheDir, "adreno").apply { mkdirs() }
         val hook = applicationInfo.nativeLibraryDir
         return if (custom) {
             val (dir, name) = installDriver()
-            Native.probe("$tmp/", "$hook/", "$dir/", name, true)
+            listOf("$tmp/", "$hook/", "$dir/", name)
         } else {
-            Native.probe("$tmp/", "$hook/", "", "", false)
+            listOf("$tmp/", "$hook/", "", "")
         }
+    }
+
+    private fun runProbe(custom: Boolean): String {
+        val p = paths(custom)
+        return Native.probe(p[0], p[1], p[2], p[3], custom)
+    }
+
+    private fun runRender(custom: Boolean, out: TextView) {
+        val s = surface
+        if (s == null) {
+            out.text = "No surface yet"
+            return
+        }
+        val p = paths(custom)
+        out.text = "Rendering..."
+        Thread {
+            val result = Native.render(s, p[0], p[1], p[2], p[3], custom)
+            runOnUiThread { out.text = result }
+        }.start()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         val out = TextView(this).apply {
-            textSize = 15f
+            textSize = 14f
             setTextIsSelectable(true)
         }
-        val sys = Button(this).apply { text = "Probe system driver" }
-        val cus = Button(this).apply { text = "Probe custom driver" }
-        sys.setOnClickListener { out.text = runProbe(false) }
-        cus.setOnClickListener { out.text = runProbe(true) }
+        val probeSys = Button(this).apply { text = "Probe system driver" }
+        val probeCus = Button(this).apply { text = "Probe custom driver" }
+        val renderSys = Button(this).apply { text = "Render test (system driver)" }
+        val renderCus = Button(this).apply { text = "Render test (custom driver)" }
+
+        probeSys.setOnClickListener { out.text = runProbe(false) }
+        probeCus.setOnClickListener { out.text = runProbe(true) }
+        renderSys.setOnClickListener { runRender(false, out) }
+        renderCus.setOnClickListener { runRender(true, out) }
+
+        val sv = SurfaceView(this)
+        sv.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(h: SurfaceHolder) { surface = h.surface }
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {}
+            override fun surfaceDestroyed(h: SurfaceHolder) { surface = null }
+        })
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 48, 32, 32)
-            addView(sys)
-            addView(cus)
-            addView(ScrollView(this@MainActivity).apply { addView(out) })
+            setPadding(24, 40, 24, 24)
+            addView(probeSys)
+            addView(probeCus)
+            addView(renderSys)
+            addView(renderCus)
+            addView(out)
+            addView(sv, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }
         setContentView(root)
     }
