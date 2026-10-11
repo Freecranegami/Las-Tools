@@ -33,6 +33,13 @@ android {
         }
     }
 
+    buildTypes {
+        getByName("debug") {
+            // Debuggable apps get Android's strict JNI checker, which kills many games.
+            isDebuggable = false
+        }
+    }
+
     // libadrenotools hook libs must exist as real files on disk
     packaging { jniLibs { useLegacyPackaging = true } }
 

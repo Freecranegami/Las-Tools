@@ -6,7 +6,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.TextView
 
-// Reads this app's own log, keeps only the last game process, drops noise.
+// Reads this app's own log, keeps only the last game process, drops noise,
+// and keeps the lines that matter when it has to shorten the text.
 object GuestLog {
 
     private val dropTokens = listOf(
@@ -17,13 +18,26 @@ object GuestLog {
         "MULTI_WINDOW_ENABLED", "NetworkSecurityConfig", "GraphicsEnvironment",
         "OpenGLRenderer", "PerfDebugMonitorImpl", "ErrnoException: open failed",
         "libcore.io.", "BlockGuardOs", "ActivityThread.main", "RuntimeInit",
-        "ZygoteInit", "reflect.Method.invoke", "Os.open(", "Linux.open("
+        "ZygoteInit", "reflect.Method.invoke", "Os.open(", "Linux.open(",
+        "system_exposed_libraries", "SurfaceSyncer", "SurfaceView", "InsetsController",
+        "RenderInspector", "MIUINDBG", "Perf    :", "GameSDKManager",
+        "framework-connectivity", "PackageParser"
     )
+
+    private val important = listOf(
+        " E ", " F ", "GuestHost", "Unity", "JNI", "Abort", "signal", "vkshim",
+        "CANNOT", "dlopen", "linker", "libvulkan", "libvkshim", "Vulkan", "vulkan",
+        "clns", "Fatal", "FATAL"
+    )
+
+    private val frameRe = Regex("#(\\d+) pc ")
+
+    private fun isImportant(l: String): Boolean = important.any { l.contains(it) }
 
     fun read(): String {
         val raw = try {
             val p = ProcessBuilder(
-                "logcat", "-d", "-b", "main", "-b", "system", "-b", "crash", "-t", "5000")
+                "logcat", "-d", "-b", "main", "-b", "system", "-b", "crash", "-t", "6000")
                 .redirectErrorStream(true).start()
             p.inputStream.bufferedReader().readText()
         } catch (e: Throwable) {
@@ -32,12 +46,25 @@ object GuestLog {
         val lines = raw.lines()
         val start = lines.indexOfLast { it.contains(":guest: Late-enabling") }
         val tail = if (start >= 0) lines.subList(start, lines.size) else lines.takeLast(300)
-        val kept = tail.filter { l -> dropTokens.none { l.contains(it) } }
+
+        val kept = ArrayList<String>()
+        for (l in tail) {
+            if (dropTokens.any { l.contains(it) }) continue
+            // crash reports: keep only the first frames of each backtrace
+            val m = frameRe.find(l)
+            if (m != null && l.contains(" DEBUG ") && m.groupValues[1].toInt() > 14) continue
+            kept.add(if (l.length > 220) l.take(220) else l)
+        }
+
         val header = if (start >= 0) "[log of the last game process]"
                      else "[no game process found, showing the recent log]"
-        val text = header + "\n" + kept.joinToString("\n")
+        var text = header + "\n" + kept.joinToString("\n")
+        if (text.length > 14000) {
+            val trimmed = kept.filterIndexed { i, l -> isImportant(l) || i >= kept.size - 40 }
+            text = "$header [trimmed]\n" + trimmed.joinToString("\n")
+        }
         return if (text.length <= 14000) text
-               else text.take(4000) + "\n...[cut]...\n" + text.takeLast(10000)
+               else text.take(3000) + "\n...[cut]...\n" + text.takeLast(11000)
     }
 
     fun copy(activity: Activity, out: TextView) {
