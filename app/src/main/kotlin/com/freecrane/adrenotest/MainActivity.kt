@@ -33,13 +33,25 @@ class MainActivity : Activity() {
 
     private var surface: Surface? = null
 
+    @Volatile
+    private var busy = false
+
     private fun installDriver(): Pair<File, String> {
         val dir = File(filesDir, "driver").apply { mkdirs() }
-        for (n in assets.list("driver") ?: emptyArray()) {
-            assets.open("driver/$n").use { i ->
-                File(dir, n).outputStream().use { o -> i.copyTo(o) }
+        val stamp = packageManager.getPackageInfo(packageName, 0).lastUpdateTime.toString()
+        val marker = File(dir, ".installed")
+
+        // Copy the driver only once per app install. Overwriting a .so that is
+        // already loaded into this process crashes it.
+        if (!marker.exists() || marker.readText() != stamp) {
+            for (n in assets.list("driver") ?: emptyArray()) {
+                assets.open("driver/$n").use { i ->
+                    File(dir, n).outputStream().use { o -> i.copyTo(o) }
+                }
             }
+            marker.writeText(stamp)
         }
+
         val meta = JSONObject(File(dir, "meta.json").readText())
         return dir to meta.getString("libraryName")
     }
@@ -56,22 +68,28 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun runProbe(custom: Boolean): String {
+    private fun runProbe(custom: Boolean, out: TextView) {
+        if (busy) { out.text = "Busy, wait for the current test to finish"; return }
         val p = paths(custom)
-        return Native.probe(p[0], p[1], p[2], p[3], custom)
+        out.text = Native.probe(p[0], p[1], p[2], p[3], custom)
     }
 
     private fun runRender(custom: Boolean, out: TextView) {
+        if (busy) { out.text = "Busy, wait for the current test to finish"; return }
         val s = surface
         if (s == null) {
             out.text = "No surface yet"
             return
         }
         val p = paths(custom)
+        busy = true
         out.text = "Rendering..."
         Thread {
             val result = Native.render(s, p[0], p[1], p[2], p[3], custom)
-            runOnUiThread { out.text = result }
+            runOnUiThread {
+                out.text = result
+                busy = false
+            }
         }.start()
     }
 
@@ -87,8 +105,8 @@ class MainActivity : Activity() {
         val renderSys = Button(this).apply { text = "Render test (system driver)" }
         val renderCus = Button(this).apply { text = "Render test (custom driver)" }
 
-        probeSys.setOnClickListener { out.text = runProbe(false) }
-        probeCus.setOnClickListener { out.text = runProbe(true) }
+        probeSys.setOnClickListener { runProbe(false, out) }
+        probeCus.setOnClickListener { runProbe(true, out) }
         renderSys.setOnClickListener { runRender(false, out) }
         renderCus.setOnClickListener { runRender(true, out) }
 
