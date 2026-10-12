@@ -3,6 +3,7 @@ package com.freecrane.adrenotest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.content.res.AssetManager
 import android.content.res.Configuration
 import android.content.res.Resources
@@ -76,7 +77,7 @@ class GuestActivity : Activity() {
 
         Log.i(logTag, "launch step 2")
         // 2. Describe the game to the system.
-        val pi = packageManager.getPackageArchiveInfo(apk.path, 0)
+        val pi = packageManager.getPackageArchiveInfo(apk.path, PackageManager.GET_META_DATA)
             ?: throw IllegalStateException("can't read the game's APK")
         val ai = pi.applicationInfo!!
         ai.sourceDir = apk.path
@@ -84,6 +85,7 @@ class GuestActivity : Activity() {
         ai.nativeLibraryDir = libDir.path
         ai.dataDir = File(filesDir, "guestdata/$pkg").apply { mkdirs() }.path
         val res = packageManager.getResourcesForApplication(ai)
+        Log.i(logTag, "game meta-data entries: " + (ai.metaData?.size() ?: -1))
 
         Log.i(logTag, "launch step 3")
         // 3. Load the game's Java code. Its parent is the system loader only, so our

@@ -307,17 +307,14 @@ class MainActivity : Activity() {
 
     private fun chooseMode(pkg: String) {
         val modes = arrayOf(
-            "1. Vulkan + game's package name",
-            "2. Vulkan + this app's package name",
-            "3. Auto graphics + game's package name",
-            "4. Auto graphics + this app's package name")
+            "1. Vulkan (forced)",
+            "2. Auto graphics (Unity chooses)")
         AlertDialog.Builder(this)
             .setTitle("Launch mode")
             .setItems(modes) { _, which ->
                 val i = Intent(this, GuestActivity::class.java)
                 i.putExtra("pkg", pkg)
-                i.putExtra("spoofName", which % 2 == 0)
-                if (which < 2) i.putExtra("unity", "-force-vulkan")
+                if (which == 0) i.putExtra("unity", "-force-vulkan")
                 startActivity(i)
             }
             .show()
