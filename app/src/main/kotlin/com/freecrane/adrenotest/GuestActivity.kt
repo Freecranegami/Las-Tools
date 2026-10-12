@@ -21,8 +21,9 @@ import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Proxy
 
 // Hosts a Unity game inside this app. The activity pretends to be the game's own
-// activity: it reports the game's package name, resources, assets, class loader and
-// APK path, then drives the game's UnityPlayer the same way UnityPlayerActivity does.
+// activity: it reports the game's package name, resources, assets, class loader,
+// APK path and data folder, then drives the game's UnityPlayer the same way
+// UnityPlayerActivity does.
 class GuestActivity : Activity() {
 
     private val logTag = "GuestHost"
@@ -30,18 +31,21 @@ class GuestActivity : Activity() {
     private var ready = false
     private lateinit var guestPkg: String
     private lateinit var guestApk: File
+    private lateinit var guestObb: File
     private lateinit var guestAi: ApplicationInfo
     private lateinit var guestRes: Resources
     private lateinit var guestLoader: ClassLoader
     private var player: Any? = null
-    private var spoofName = true
 
     override fun getResources(): Resources = if (ready) guestRes else super.getResources()
     override fun getAssets(): AssetManager = if (ready) guestRes.assets else super.getAssets()
     override fun getApplicationInfo(): ApplicationInfo = if (ready) guestAi else super.getApplicationInfo()
-    override fun getPackageName(): String = if (ready && spoofName) guestPkg else super.getPackageName()
+    override fun getPackageName(): String = if (ready) guestPkg else super.getPackageName()
     override fun getPackageCodePath(): String = if (ready) guestApk.path else super.getPackageCodePath()
+    override fun getPackageResourcePath(): String = if (ready) guestApk.path else super.getPackageResourcePath()
     override fun getClassLoader(): ClassLoader = if (ready) guestLoader else super.getClassLoader()
+    override fun getObbDir(): File = if (ready) guestObb else super.getObbDir()
+    override fun getObbDirs(): Array<File> = if (ready) arrayOf(guestObb) else super.getObbDirs()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -61,49 +65,56 @@ class GuestActivity : Activity() {
     private fun launchGuest() {
         val app = applicationContext      // always the host app, never overridden
         val pkg = intent.getStringExtra("pkg") ?: throw IllegalStateException("no game chosen")
-        spoofName = intent.getBooleanExtra("spoofName", true)
-        Log.i(logTag, "mode: spoofName=" + spoofName + " unity=" + intent.getStringExtra("unity"))
         val root = File(filesDir, "guests/$pkg")
         val apk = File(root, "base.apk")
         val libDir = File(root, "lib")
+        val obbDir = File(root, "obb").apply { mkdirs() }
         if (!apk.exists()) throw IllegalStateException("game not imported: $pkg")
 
-        Log.i(logTag, "launch step 1")
         // 1. Shim next to the game's libraries, then open the custom driver.
+        Log.i(logTag, "launch step 1")
         Util.ensureShim(app, libDir)
         val p = Util.paths(app, true)
         val status = Native.openCustom(p[0], p[1], p[2], p[3])
         if (status != "custom driver open") throw IllegalStateException(status)
 
+        // 2. Describe the game to the system (base APK plus its splits).
         Log.i(logTag, "launch step 2")
-        // 2. Describe the game to the system.
         val pi = packageManager.getPackageArchiveInfo(apk.path, PackageManager.GET_META_DATA)
             ?: throw IllegalStateException("can't read the game's APK")
         val ai = pi.applicationInfo!!
+        val splitPaths = Util.guestSplits(root).map { it.path }.toTypedArray()
         ai.sourceDir = apk.path
         ai.publicSourceDir = apk.path
+        if (splitPaths.isNotEmpty()) {
+            ai.splitSourceDirs = splitPaths
+            ai.splitPublicSourceDirs = splitPaths
+        }
         ai.nativeLibraryDir = libDir.path
         ai.dataDir = File(filesDir, "guestdata/$pkg").apply { mkdirs() }.path
         val res = packageManager.getResourcesForApplication(ai)
-        Log.i(logTag, "game meta-data entries: " + (ai.metaData?.size() ?: -1))
+        Log.i(logTag, "game meta-data entries: " + (ai.metaData?.size() ?: -1) +
+            ", splits: " + splitPaths.size)
 
+        // 3. Load the game's Java code (from the base APK and any split with code).
+        //    Its parent is the system loader only, so our own classes stay hidden.
         Log.i(logTag, "launch step 3")
-        // 3. Load the game's Java code. Its parent is the system loader only, so our
-        //    own classes stay hidden from the game.
-        apk.setReadOnly()
+        val dexPath = Util.guestDexPath(root)
+        for (f in dexPath.split(":")) File(f).setReadOnly()
         val dexOut = File(codeCacheDir, "guestdex").apply { mkdirs() }
         val loader = DexClassLoader(
-            apk.path, dexOut.path, libDir.path, Activity::class.java.classLoader)
+            dexPath, dexOut.path, libDir.path, Activity::class.java.classLoader)
 
         guestPkg = pkg
         guestApk = apk
+        guestObb = obbDir
         guestAi = ai
         guestRes = res
         guestLoader = loader
         ready = true
 
-        Log.i(logTag, "launch step 4")
         // 4. Start the game.
+        Log.i(logTag, "launch step 4")
         val obj = createPlayer()
         player = obj
         Log.i(logTag, "player object created")

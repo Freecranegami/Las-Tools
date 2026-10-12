@@ -103,4 +103,24 @@ object Util {
             if (p.processName.endsWith(":guest")) android.os.Process.killProcess(p.pid)
         }
     }
+
+    // ---- layout of an imported game ----
+    //   base.apk, splits/*.apk, lib/*.so, obb/*, dexapks.txt, adapter.txt, report.txt
+
+    fun guestSplits(root: File): List<File> {
+        val files = File(root, "splits").listFiles { f -> f.isFile && f.name.endsWith(".apk") }
+        return (files ?: emptyArray<File>()).sortedBy { it.name }
+    }
+
+    // The APK files that contain game code, joined for a class loader.
+    fun guestDexPath(root: File): String {
+        val list = File(root, "dexapks.txt")
+        val files = if (list.exists()) {
+            list.readLines().filter { it.isNotBlank() }.map { File(root, it) }.filter { it.exists() }
+        } else {
+            emptyList()
+        }
+        val use = if (files.isEmpty()) listOf(File(root, "base.apk")) else files
+        return use.joinToString(":") { it.path }
+    }
 }

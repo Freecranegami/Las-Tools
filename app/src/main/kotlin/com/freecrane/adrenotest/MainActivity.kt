@@ -139,13 +139,14 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------- guest APK import ----------
+    // ---------- guest import (one APK, several APKs, or a bundle) ----------
 
     private fun pickApk() {
         if (busy) { outView.text = "Busy, wait for the current task to finish"; return }
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
         startActivityForResult(i, pickRequest)
     }
@@ -153,18 +154,24 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        val uri = data?.data
-        if (requestCode == pickRequest && resultCode == RESULT_OK && uri != null) {
-            importApk(uri)
+        if (requestCode != pickRequest || resultCode != RESULT_OK || data == null) return
+        val uris = ArrayList<Uri>()
+        val clip = data.clipData
+        if (clip != null) {
+            for (k in 0 until clip.itemCount) uris.add(clip.getItemAt(k).uri)
+        } else {
+            val one = data.data
+            if (one != null) uris.add(one)
         }
+        if (uris.isNotEmpty()) importFiles(uris)
     }
 
-    private fun importApk(uri: Uri) {
+    private fun importFiles(uris: List<Uri>) {
         busy = true
-        outView.text = "Importing... large games can take a few minutes."
+        outView.text = "Importing... large games can take several minutes."
         Thread {
             val msg = try {
-                doImport(uri)
+                Importer.importAll(this, uris) { p -> runOnUiThread { outView.text = p } }
             } catch (e: Throwable) {
                 "Import failed: $e"
             }
@@ -173,105 +180,6 @@ class MainActivity : Activity() {
                 busy = false
             }
         }.start()
-    }
-
-    private fun doImport(uri: Uri): String {
-        Util.killGuestProcess(this)
-
-        val root = File(filesDir, "guests").apply { mkdirs() }
-        val tmp = File(root, "incoming.apk")
-        contentResolver.openInputStream(uri)!!.use { i ->
-            tmp.outputStream().use { o -> i.copyTo(o, 1 shl 16) }
-        }
-
-        val pi = packageManager.getPackageArchiveInfo(
-            tmp.path, PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA)
-        if (pi == null) {
-            tmp.delete()
-            return "That file isn't a readable single-file APK.\n" +
-                "Bundles (.xapk, .apks, split APKs) aren't supported yet."
-        }
-        val ai = pi.applicationInfo!!
-        ai.sourceDir = tmp.path
-        ai.publicSourceDir = tmp.path
-        val label = ai.loadLabel(packageManager).toString()
-        val pkg = pi.packageName
-
-        val dir = File(root, pkg)
-        dir.deleteRecursively()
-        dir.mkdirs()
-        val apk = File(dir, "base.apk")
-        if (!tmp.renameTo(apk)) {
-            tmp.copyTo(apk, overwrite = true)
-            tmp.delete()
-        }
-        val libDir = File(dir, "lib").apply { mkdirs() }
-
-        val abis = sortedSetOf<String>()
-        var dexCount = 0
-        var extracted = 0
-        var bytes = 0L
-        val vulkanLibs = mutableListOf<String>()
-
-        ZipFile(apk).use { zip ->
-            val entries = zip.entries()
-            while (entries.hasMoreElements()) {
-                val e = entries.nextElement()
-                val name = e.name
-                if (name.startsWith("lib/") && name.endsWith(".so")) {
-                    val parts = name.split("/")
-                    if (parts.size == 3) {
-                        abis.add(parts[1])
-                        if (parts[1] == "arm64-v8a") {
-                            val target = File(libDir, parts[2])
-                            val refs = zip.getInputStream(e).use { i ->
-                                target.outputStream().use { o -> Util.copyPatched(i, o) }
-                            }
-                            extracted++
-                            bytes += target.length()
-                            if (refs > 0) vulkanLibs.add(parts[2])
-                        }
-                    }
-                } else if (name.matches(Regex("classes\\d*\\.dex"))) {
-                    dexCount++
-                }
-            }
-        }
-        if (extracted > 0) Util.ensureShim(this, libDir)
-
-        val nativeActivity = pi.activities?.any { it.name == "android.app.NativeActivity" } == true
-        val sb = StringBuilder()
-        sb.append("Imported: $label\n")
-        sb.append("Package: $pkg\n")
-        sb.append("Version: ${pi.versionName}\n")
-        sb.append("Target SDK: ${ai.targetSdkVersion}\n")
-        sb.append("Activities: ${pi.activities?.size ?: 0}")
-        if (nativeActivity) sb.append(" (uses NativeActivity)")
-        sb.append("\nJava code: $dexCount dex file(s)\n")
-        sb.append("ABIs in APK: ${if (abis.isEmpty()) "none" else abis.joinToString(", ")}\n")
-        if (!abis.contains("arm64-v8a")) {
-            sb.append("No 64-bit libraries found. ")
-            sb.append(if (abis.isEmpty())
-                "This may be a split bundle with libraries in a separate file.\n"
-            else
-                "This app is 32-bit only and can't run in this 64-bit app.\n")
-        } else {
-            sb.append("64-bit libs extracted: $extracted (${bytes / 1024 / 1024} MB)\n")
-            if (vulkanLibs.isEmpty()) {
-                sb.append("Vulkan: no libvulkan.so reference found (likely OpenGL ES only)\n")
-            } else {
-                sb.append("Vulkan: yes, ${vulkanLibs.size} lib(s) reference libvulkan.so\n")
-                sb.append("  " + vulkanLibs.take(6).joinToString(", ") +
-                    (if (vulkanLibs.size > 6) ", ..." else "") + "\n")
-                sb.append("Those references now point to the custom-driver shim.\n")
-            }
-        }
-        val adapter = if (File(libDir, "libunity.so").exists()) "unity" else if (nativeActivity) "native" else "unknown"
-        File(dir, "adapter.txt").writeText(adapter)
-        sb.append("Launcher: " + adapter + "\n")
-        val report = sb.toString()
-        File(dir, "report.txt").writeText(report)
-        return report
     }
 
     private fun showImported(out: TextView) {
@@ -409,7 +317,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(16, 32, 16, 16)
             addView(row(
-                btn("Import APK") { pickApk() },
+                btn("Import game") { pickApk() },
                 btn("Imported list") { showImported(out) },
                 btn("Launch game") { launchGame() }))
             addView(row(
