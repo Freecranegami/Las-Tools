@@ -266,6 +266,9 @@ class MainActivity : Activity() {
                 sb.append("Those references now point to the custom-driver shim.\n")
             }
         }
+        val adapter = if (File(libDir, "libunity.so").exists()) "unity" else if (nativeActivity) "native" else "unknown"
+        File(dir, "adapter.txt").writeText(adapter)
+        sb.append("Launcher: " + adapter + "\n")
         val report = sb.toString()
         File(dir, "report.txt").writeText(report)
         return report
@@ -306,6 +309,22 @@ class MainActivity : Activity() {
     }
 
     private fun chooseMode(pkg: String) {
+        val adapter = try {
+            File(File(filesDir, "guests/$pkg"), "adapter.txt").readText().trim()
+        } catch (e: Exception) {
+            "unity"
+        }
+        if (adapter == "native") {
+            val i = Intent(this, GuestNativeActivity::class.java)
+            i.putExtra("pkg", pkg)
+            startActivity(i)
+            return
+        }
+        if (adapter == "unknown") {
+            outView.text = "This game has no supported launcher yet " +
+                "(it isn't Unity and doesn't use NativeActivity)."
+            return
+        }
         val modes = arrayOf(
             "1. Vulkan (forced)",
             "2. Auto graphics (Unity chooses)")

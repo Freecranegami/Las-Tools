@@ -25,5 +25,11 @@
             android:exported="false"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|layoutDirection|locale" />
+        <activity
+            android:name=".GuestNativeActivity"
+            android:process=":guest"
+            android:exported="false"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density" />
     </application>
 </manifest>

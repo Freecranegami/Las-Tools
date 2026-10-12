@@ -28,7 +28,7 @@ object GuestLog {
     )
 
     private val important = listOf(
-        " E ", " F ", "GuestHost", "Unity", "JNI", "Abort", "signal", "vkshim",
+        " E ", " F ", "GuestHost", "GuestGame", "Unity", "JNI", "Abort", "signal", "vkshim",
         "CANNOT", "dlopen", "linker", "libvulkan", "libvkshim", "Vulkan", "vulkan",
         "clns", "Fatal", "FATAL", "Exception"
     )

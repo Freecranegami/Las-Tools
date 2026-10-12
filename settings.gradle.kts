@@ -6,3 +6,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "adrenotest"
 include(":app")
+include(":guestgame")
