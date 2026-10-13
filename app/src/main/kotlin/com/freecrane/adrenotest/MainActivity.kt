@@ -217,20 +217,38 @@ class MainActivity : Activity() {
     }
 
     private fun chooseMode(pkg: String) {
+        val dir = File(filesDir, "guests/$pkg")
         val adapter = try {
-            File(File(filesDir, "guests/$pkg"), "adapter.txt").readText().trim()
+            File(dir, "adapter.txt").readText().trim()
         } catch (e: Exception) {
             "unity"
+        }
+        if (adapter == "unknown") {
+            outView.text = "Looking at the game's files to find its launcher..."
+            busy = true
+            Thread {
+                val found = try {
+                    Importer.reanalyze(this, pkg)
+                } catch (e: Throwable) {
+                    "unknown"
+                }
+                runOnUiThread {
+                    busy = false
+                    if (found == "unknown") {
+                        outView.text = "This game has no supported launcher yet " +
+                            "(no Unity, and no NativeActivity found in its settings or code)."
+                    } else {
+                        outView.text = "Found its launcher: $found"
+                        chooseMode(pkg)
+                    }
+                }
+            }.start()
+            return
         }
         if (adapter == "native") {
             val i = Intent(this, GuestNativeActivity::class.java)
             i.putExtra("pkg", pkg)
             startActivity(i)
-            return
-        }
-        if (adapter == "unknown") {
-            outView.text = "This game has no supported launcher yet " +
-                "(it isn't Unity and doesn't use NativeActivity)."
             return
         }
         val modes = arrayOf(

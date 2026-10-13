@@ -6,13 +6,12 @@ import android.content.res.AssetManager
 import android.content.res.Resources
 import android.os.Bundle
 import android.util.Log
-import dalvik.system.DexClassLoader
 import java.io.File
 
-// Hosts a NativeActivity game. NativeActivity looks up its library ("main" by default)
-// through the activity's class loader, so we hand it one that points at the game's
-// own private folder, open the custom driver first, and give it the game's assets
-// (including split APKs) and data folder.
+// Hosts a NativeActivity game. NativeActivity looks up its library through the activity's
+// class loader, so we hand it one that points at the game's own private folder (and maps
+// "main" to the game's real library), open the custom driver first, and give it the
+// game's assets (including split APKs) and data folder.
 class GuestNativeActivity : NativeActivity() {
 
     private val logTag = "GuestHost"
@@ -37,6 +36,19 @@ class GuestNativeActivity : NativeActivity() {
         Log.i(logTag, "native activity created")
     }
 
+    // The game's declared library name (from native.txt), as a real file, or null.
+    private fun mainLibPath(root: File, libDir: File): String? {
+        val f = File(root, "native.txt")
+        if (!f.exists()) return null
+        val lib = f.readLines().firstOrNull { it.startsWith("lib=") }?.substring(4)?.trim()
+        if (lib == null || lib.isEmpty() || lib == "main") return null
+        val candidates = listOf(
+            File(libDir, "lib$lib.so"),
+            File(libDir, lib),
+            File(libDir, "lib" + lib.removePrefix("lib").removeSuffix(".so") + ".so"))
+        return candidates.firstOrNull { it.exists() }?.path
+    }
+
     private fun prepare() {
         val app = applicationContext
         val pkg = intent.getStringExtra("pkg") ?: throw IllegalStateException("no game chosen")
@@ -55,8 +67,10 @@ class GuestNativeActivity : NativeActivity() {
         val dexPath = Util.guestDexPath(root)
         for (f in dexPath.split(":")) File(f).setReadOnly()
         val dexOut = File(codeCacheDir, "guestdex").apply { mkdirs() }
-        guestLoader = DexClassLoader(
-            dexPath, dexOut.path, libDir.path, Activity::class.java.classLoader)
+        val nativeLib = mainLibPath(root, libDir)
+        Log.i(logTag, "native library: " + (nativeLib ?: "main (default)"))
+        guestLoader = GuestLoader(
+            dexPath, dexOut.path, libDir.path, Activity::class.java.classLoader, nativeLib)
 
         // the game's own assets and resources (base APK plus splits)
         try {

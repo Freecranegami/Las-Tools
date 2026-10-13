@@ -148,6 +148,107 @@ object Importer {
         }
     }
 
+    private class NativeInfo(
+        val isNative: Boolean, val lib: String?, val func: String?, val activity: String?)
+
+    // Looks for a byte pattern in a stream (used to find framework class names in code).
+    private fun scan(input: java.io.InputStream, needle: ByteArray): Boolean {
+        input.use { ins ->
+            val buf = ByteArray(1 shl 20)
+            var filled = 0
+            while (true) {
+                val r = ins.read(buf, filled, buf.size - filled)
+                if (r < 0) break
+                filled += r
+                var i = 0
+                while (i <= filled - needle.size) {
+                    if (buf[i] == needle[0]) {
+                        var m = true
+                        for (j in 1 until needle.size) {
+                            if (buf[i + j] != needle[j]) { m = false; break }
+                        }
+                        if (m) return true
+                    }
+                    i++
+                }
+                val keep = minOf(needle.size - 1, filled)
+                System.arraycopy(buf, filled - keep, buf, 0, keep)
+                filled = keep
+            }
+        }
+        return false
+    }
+
+    private fun dexMentionsNativeActivity(apk: File): Boolean {
+        val needle = "Landroid/app/NativeActivity;".toByteArray()
+        try {
+            ZipFile(apk).use { zip ->
+                val en = zip.entries()
+                while (en.hasMoreElements()) {
+                    val e = en.nextElement()
+                    if (!e.name.matches(Regex("classes\\d*\\.dex"))) continue
+                    if (scan(zip.getInputStream(e), needle)) return true
+                }
+            }
+        } catch (ex: Exception) {
+            // unreadable; treat as not found
+        }
+        return false
+    }
+
+    // A game can use NativeActivity directly, or through its own subclass. A subclass
+    // shows up as an activity with a "lib_name" setting, or as NativeActivity being
+    // named in the game's code.
+    private fun detectNative(pi: PackageInfo, dexApks: List<File>): NativeInfo {
+        var isNative = false
+        var activity: String? = null
+        var lib: String? = null
+        var func: String? = null
+        for (a in pi.activities ?: emptyArray<android.content.pm.ActivityInfo>()) {
+            if (a.name == "android.app.NativeActivity") {
+                isNative = true
+                if (activity == null) activity = a.name
+            }
+            val md = a.metaData
+            val ln = md?.getString("android.app.lib_name")
+            if (ln != null) {
+                isNative = true
+                activity = a.name
+                lib = ln
+                func = md.getString("android.app.func_name")
+                break
+            }
+        }
+        if (!isNative) {
+            for (f in dexApks) {
+                if (dexMentionsNativeActivity(f)) { isNative = true; break }
+            }
+        }
+        return NativeInfo(isNative, lib, func, activity)
+    }
+
+    private fun writeNativeInfo(dir: File, info: NativeInfo) {
+        File(dir, "native.txt").writeText(
+            "lib=" + (info.lib ?: "") + "\n" +
+            "func=" + (info.func ?: "") + "\n" +
+            "activity=" + (info.activity ?: "") + "\n")
+    }
+
+    // Re-checks an already imported game (no re-import needed). Returns the launcher kind.
+    fun reanalyze(ctx: Context, pkg: String): String {
+        val dir = File(ctx.filesDir, "guests/$pkg")
+        val files = GuestFiles.apks(dir)
+        val pi = ctx.packageManager.getPackageArchiveInfo(
+            files.base.path, PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA)
+            ?: return "unknown"
+        val info = detectNative(pi, files.dexPaths)
+        val adapter = if (File(File(dir, "lib"), "libunity.so").exists()) "unity"
+                      else if (info.isNative) "native" else "unknown"
+        File(dir, "adapter.txt").writeText(adapter)
+        writeNativeInfo(dir, info)
+        return adapter
+    }
+
     fun importAll(ctx: Context, uris: List<Uri>, progress: (String) -> Unit): String {
         Util.killGuestProcess(ctx)
         val root = File(ctx.filesDir, "guests").apply { mkdirs() }
@@ -278,10 +379,12 @@ object Importer {
         File(dir, "dexapks.txt").writeText(dexApks.joinToString("\n"))
         if (libCount > 0) Util.ensureShim(ctx, libDir)
 
-        val nativeActivity = pi.activities?.any { it.name == "android.app.NativeActivity" } == true
+        val nInfo = detectNative(pi, dexApks.map { File(dir, it) })
+        val nativeActivity = nInfo.isNative
         val adapter = if (File(libDir, "libunity.so").exists()) "unity"
                       else if (nativeActivity) "native" else "unknown"
         File(dir, "adapter.txt").writeText(adapter)
+        writeNativeInfo(dir, nInfo)
 
         val sb = StringBuilder()
         sb.append("Imported: $label\n")
@@ -294,7 +397,11 @@ object Importer {
             sb.append("Data files (.obb): ${obbs.size} (${obbBytes / 1024 / 1024} MB)\n")
         }
         sb.append("Activities: ${pi.activities?.size ?: 0}")
-        if (nativeActivity) sb.append(" (uses NativeActivity)")
+        if (nativeActivity) {
+            sb.append(" (NativeActivity" +
+                (if (nInfo.activity != null) ": " + nInfo.activity else "") +
+                (if (nInfo.lib != null) ", library " + nInfo.lib else "") + ")")
+        }
         sb.append("\nJava code: $dexCount dex file(s)\n")
         sb.append("ABIs found: ${if (abis.isEmpty()) "none" else abis.joinToString(", ")}\n")
         if (!abis.contains("arm64-v8a")) {
