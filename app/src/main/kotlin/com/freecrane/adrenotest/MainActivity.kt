@@ -8,7 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -246,9 +250,19 @@ class MainActivity : Activity() {
             return
         }
         if (adapter == "native") {
-            val i = Intent(this, GuestNativeActivity::class.java)
-            i.putExtra("pkg", pkg)
-            startActivity(i)
+            val real = GuestRuntime.nativeActivity(dir)
+            if (real == null || Build.VERSION.SDK_INT < 29) {
+                startLegacyNative(pkg)
+                return
+            }
+            AlertDialog.Builder(this)
+                .setTitle("Launch mode")
+                .setItems(arrayOf(
+                    "1. Run the game's own activity (new)",
+                    "2. Basic native launcher (old)")) { _, which ->
+                    if (which == 0) startReal(pkg, real) else startLegacyNative(pkg)
+                }
+                .show()
             return
         }
         val modes = arrayOf(
@@ -263,6 +277,54 @@ class MainActivity : Activity() {
                 startActivity(i)
             }
             .show()
+    }
+
+    private fun startLegacyNative(pkg: String) {
+        val i = Intent(this, GuestNativeActivity::class.java)
+        i.putExtra("pkg", pkg)
+        startActivity(i)
+    }
+
+    // Starts the game's own activity class through the proxy. The game process is stopped
+    // first so every launch begins clean (drivers and game libraries load once per process).
+    private fun startReal(pkg: String, activity: String) {
+        outView.text = "Starting $activity ..."
+        Util.killGuestProcess(this)
+        Handler(Looper.getMainLooper()).postDelayed({
+            val i = Intent(this, GuestProxyActivity::class.java)
+            i.putExtra(GuestRuntime.EXTRA_PKG, pkg)
+            i.putExtra(GuestRuntime.EXTRA_ACTIVITY, activity)
+            startActivity(i)
+        }, 600)
+    }
+
+    // Used by the build script: adb shell am start -n <app>/.MainActivity --es launch <pkg> [--es mode legacy]
+    private fun autoLaunch(pkg: String, mode: String?) {
+        Log.i("GuestHost", "auto launch requested: $pkg mode=${mode ?: "real"}")
+        val dir = File(filesDir, "guests/$pkg")
+        if (!File(dir, "base.apk").exists()) {
+            outView.text = "Auto launch: game not imported: $pkg"
+            Log.e("GuestHost", "auto launch: game not imported: $pkg")
+            return
+        }
+        Thread {
+            var act = GuestRuntime.nativeActivity(dir)
+            if (act == null) {
+                try { Importer.reanalyze(this, pkg) } catch (t: Throwable) { }
+                act = GuestRuntime.nativeActivity(dir)
+            }
+            val found = act
+            runOnUiThread {
+                if (mode == "legacy") {
+                    startLegacyNative(pkg)
+                } else if (found != null && Build.VERSION.SDK_INT >= 29) {
+                    startReal(pkg, found)
+                } else {
+                    outView.text = "Auto launch: no game activity recorded for $pkg"
+                    Log.e("GuestHost", "auto launch: no game activity recorded for $pkg")
+                }
+            }
+        }.start()
     }
 
     // ---------- log viewer ----------
@@ -358,5 +420,8 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }
         setContentView(root)
+
+        val auto = intent?.getStringExtra("launch")
+        if (auto != null) autoLaunch(auto, intent?.getStringExtra("mode"))
     }
 }
