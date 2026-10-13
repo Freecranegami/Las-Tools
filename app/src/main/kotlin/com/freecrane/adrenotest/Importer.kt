@@ -237,11 +237,11 @@ object Importer {
     // Re-checks an already imported game (no re-import needed). Returns the launcher kind.
     fun reanalyze(ctx: Context, pkg: String): String {
         val dir = File(ctx.filesDir, "guests/$pkg")
-        val files = GuestFiles.apks(dir)
+        val basePath = File(dir, "base.apk").path
         val pi = ctx.packageManager.getPackageArchiveInfo(
-            files.base.path, PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA)
+            basePath, PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA)
             ?: return "unknown"
-        val info = detectNative(pi, files.dexPaths)
+        val info = detectNative(pi, Util.guestDexPath(dir).split(":").map { File(it) })
         val adapter = if (File(File(dir, "lib"), "libunity.so").exists()) "unity"
                       else if (info.isNative) "native" else "unknown"
         File(dir, "adapter.txt").writeText(adapter)
