@@ -23,6 +23,7 @@ class GuestContext(base: Context, private val g: GuestRuntime.Guest) : ContextWr
     override fun getPackageResourcePath(): String = g.apk.path
     override fun getObbDir(): File = g.obbDir
     override fun getObbDirs(): Array<File> = arrayOf(g.obbDir)
+    override fun getApplicationContext(): Context = g.app ?: super.getApplicationContext()
 
     companion object {
         private const val TAG = "GuestHost"
@@ -47,8 +48,11 @@ class GuestContext(base: Context, private val g: GuestRuntime.Guest) : ContextWr
             val res = setField(ContextThemeWrapper::class.java, "mResources", a, null)
             val theme = setField(ContextThemeWrapper::class.java, "mTheme", a, null)
             val infl = setField(ContextThemeWrapper::class.java, "mInflater", a, null)
+            // Activity.getApplication() should hand back the game's Application, not ours.
+            val gameApp = g.app
+            val app = if (gameApp != null) setField(Activity::class.java, "mApplication", a, gameApp) else true
             Log.i(TAG, "game context installed for ${a.javaClass.name}: " +
-                "base=$base resources=$res theme=$theme inflater=$infl")
+                "base=$base resources=$res theme=$theme inflater=$infl application=$app")
         }
     }
 }

@@ -1,7 +1,9 @@
 package com.freecrane.adrenotest
 
 import android.app.Activity
+import android.app.Application
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.Resources
@@ -23,7 +25,11 @@ object GuestRuntime {
         val ai: ApplicationInfo,
         val res: Resources,
         val loader: GuestLoader,
-        val obbDir: File)
+        val obbDir: File) {
+        // The game's own Application object, once started.
+        @Volatile
+        var app: Application? = null
+    }
 
     @Volatile
     var current: Guest? = null
@@ -96,8 +102,35 @@ object GuestRuntime {
         Log.i(TAG, "game application class: ${ai.className ?: "none"}, " +
             "target SDK ${ai.targetSdkVersion}, splits ${splits.size}")
 
+        Log.i(TAG, "native.txt: lib=${nativeValue(root, "lib") ?: "-"} " +
+            "func=${nativeValue(root, "func") ?: "-"} activity=${nativeValue(root, "activity") ?: "-"}")
+
         val g = Guest(pkg, apk, ai, res, loader, File(root, "obb").apply { mkdirs() })
         current = g
+        startGameApplication(app, g)
         return g
+    }
+
+    // Android starts the app's Application before any of its activities. Games keep
+    // state there (and in statics it sets), so start the game's own one the same way.
+    private fun startGameApplication(host: Context, g: Guest) {
+        val name = g.ai.className
+        if (name.isNullOrEmpty() || name == "android.app.Application") {
+            Log.i(TAG, "game has no Application class of its own")
+            return
+        }
+        Log.i(TAG, "starting the game's Application: $name")
+        try {
+            val a = g.loader.loadClass(name).getDeclaredConstructor().newInstance() as Application
+            val attach = ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
+            attach.isAccessible = true
+            attach.invoke(a, GuestContext(host, g))
+            g.app = a
+            a.onCreate()
+            Log.i(TAG, "game Application started")
+        } catch (t: Throwable) {
+            Log.e(TAG, "the game's Application failed to start", t)
+            throw t
+        }
     }
 }
