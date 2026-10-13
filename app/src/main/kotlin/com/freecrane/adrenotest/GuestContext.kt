@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.content.res.AssetManager
 import android.content.res.Resources
 import android.util.Log
@@ -24,6 +25,13 @@ class GuestContext(base: Context, private val g: GuestRuntime.Guest) : ContextWr
     override fun getObbDir(): File = g.obbDir
     override fun getObbDirs(): Array<File> = arrayOf(g.obbDir)
     override fun getApplicationContext(): Context = g.app ?: super.getApplicationContext()
+
+    // Questions about the game's own package are answered from its APK (see GuestPm).
+    override fun getPackageManager(): PackageManager {
+        val pm = super.getPackageManager()
+        GuestPm.install(pm, g)
+        return pm
+    }
 
     companion object {
         private const val TAG = "GuestHost"
