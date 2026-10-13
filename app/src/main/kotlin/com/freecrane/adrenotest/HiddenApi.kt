@@ -11,7 +11,7 @@ object HiddenApi {
         try {
             val forName = Class::class.java.getDeclaredMethod("forName", String::class.java)
             val getDeclaredMethod = Class::class.java.getDeclaredMethod(
-                "getDeclaredMethod", String::class.java, Array<Class<*>>::class.java)
+                "getDeclaredMethod", String::class.java, arrayOf<Class<*>>()::class.java)
             val vmRuntime = forName.invoke(null, "dalvik.system.VMRuntime") as Class<*>
             val getRuntime = getDeclaredMethod.invoke(vmRuntime, "getRuntime", null) as Method
             val setExemptions = getDeclaredMethod.invoke(
