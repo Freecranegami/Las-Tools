@@ -19,7 +19,17 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
-      - run: gradle assembleDebug --no-daemon
+      - name: Build
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon 2>&1 | tee build.log
+      - name: Show build errors in the run summary
+        if: failure()
+        run: |
+          msg=$(grep -aE '^e: |error:|AAPT|What went wrong|Execution failed' -A2 build.log | head -40 | cut -c1-300)
+          msg="${msg//'%'/'%25'}"
+          msg="${msg//$'\n'/'%0A'}"
+          echo "::error title=Build errors::$msg"
       - name: Collect APKs
         run: |
           mkdir -p dist
