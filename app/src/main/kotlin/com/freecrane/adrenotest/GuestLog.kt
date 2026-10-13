@@ -57,7 +57,8 @@ object GuestLog {
             val m = frameRe.find(l)
             if (m != null && (l.contains(" DEBUG ") || l.contains(" CRASH ")) &&
                 m.groupValues[1].toInt() > 14) continue
-            kept.add(if (l.length > 220) l.take(220) else l)
+            val cap = if (l.contains("GuestHost")) 700 else 220
+            kept.add(if (l.length > cap) l.take(cap) else l)
         }
 
         val header = if (start >= 0) "[log since the last game launch]"
