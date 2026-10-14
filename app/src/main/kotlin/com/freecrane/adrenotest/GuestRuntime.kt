@@ -84,6 +84,15 @@ object GuestRuntime {
         Log.i(TAG, "native library: " + (nativeLib ?: "main (default)"))
         val loader = GuestLoader(
             dexPath, dexOut.path, libDir.path, Activity::class.java.classLoader, nativeLib)
+        try {
+            val sd = File(root, "splits")
+            val list = sd.listFiles()?.sortedBy { it.name } ?: emptyList()
+            Log.i(TAG, "splits on disk: " + list.joinToString("; ") { f ->
+                val n = try { java.util.zip.ZipFile(f).use { z ->
+                    z.entries().asSequence().count { it.name.startsWith("assets/") } } } catch (t: Throwable) { -1 }
+                "${f.name} ${f.length() / 1024}KB assets=$n"
+            })
+        } catch (t: Throwable) { Log.w(TAG, "split listing failed: $t") }
         try { Log.i(TAG, Native.installFindClassHook(loader)) }
         catch (t: Throwable) { Log.w(TAG, "FindClass hook failed: $t") }
 
