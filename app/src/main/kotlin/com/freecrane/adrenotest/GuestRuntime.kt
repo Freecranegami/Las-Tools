@@ -125,6 +125,23 @@ object GuestRuntime {
         ai.nativeLibraryDir = libDir.path
         ai.dataDir = File(app.filesDir, "guestdata/$pkg").apply { mkdirs() }.path
         val res = pm.getResourcesForApplication(ai)
+        try {
+            Log.i(TAG, "assets seen by the game: " +
+                (res.assets.list("")?.sorted()?.joinToString(",") ?: "none"))
+            for (f in Util.guestSplits(root)) {
+                java.util.zip.ZipFile(f).use { z ->
+                    val first = z.entries().asSequence().filter { it.name.startsWith("assets/") && !it.isDirectory }.take(3).toList()
+                    for (e in first) {
+                        val rel = e.name.removePrefix("assets/")
+                        val ok = try {
+                            res.assets.open(rel, android.content.res.AssetManager.ACCESS_STREAMING).use { it.read() }
+                            "readable"
+                        } catch (t: Throwable) { "NOT readable: " + t.javaClass.simpleName }
+                        Log.i(TAG, "asset in ${f.name}: $rel ${e.size / 1024}KB method=${e.method} -> $ok")
+                    }
+                }
+            }
+        } catch (t: Throwable) { Log.w(TAG, "asset check failed: $t") }
         Log.i(TAG, "game application class: ${ai.className ?: "none"}, " +
             "target SDK ${ai.targetSdkVersion}, splits ${splits.size}")
 
