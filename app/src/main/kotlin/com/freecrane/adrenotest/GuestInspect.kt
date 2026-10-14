@@ -149,4 +149,57 @@ object GuestInspect {
             android.util.Log.w(tag, "reflect manager failed: ${t.cause ?: t}")
         }
     }
+
+    // What does Play Core itself say about each asset pack, with no Play Store to ask?
+    fun packReport(a: android.app.Activity) {
+        Thread {
+            val tag = "GuestHost"
+            val base = "com.google.android.play.core.assetpacks."
+            try {
+                val cl = a.javaClass.classLoader
+                val f = Class.forName(base + "AssetPackManagerFactory", true, cl)
+                val mgr = f.getMethod("getInstance", android.content.Context::class.java).invoke(null, a)!!
+                val mc = Class.forName(base + "AssetPackManager", true, cl)
+                val names = GuestRuntime.splitNames.toList()
+                for (n in names) {
+                    try {
+                        val loc = mc.getMethod("getPackLocation", String::class.java).invoke(mgr, n)
+                        if (loc == null) android.util.Log.i(tag, "pack report: location($n) = null")
+                        else {
+                            val lc = Class.forName(base + "AssetPackLocation", true, cl)
+                            android.util.Log.i(tag, "pack report: location($n) storage=" +
+                                lc.getMethod("packStorageMethod").invoke(loc) + " path=" +
+                                lc.getMethod("assetsPath").invoke(loc))
+                        }
+                    } catch (t: Throwable) { android.util.Log.w(tag, "pack report: location($n) failed: ${t.cause ?: t}") }
+                }
+                val task = mc.getMethod("getPackStates", java.util.List::class.java).invoke(mgr, names)!!
+                val tk = Class.forName("com.google.android.gms.tasks.Task", true, cl)
+                var waited = 0
+                while (!(tk.getMethod("isComplete").invoke(task) as Boolean) && waited < 8000) {
+                    Thread.sleep(100); waited += 100
+                }
+                if (!(tk.getMethod("isComplete").invoke(task) as Boolean)) {
+                    android.util.Log.i(tag, "pack report: getPackStates did not finish in 8 s"); return@Thread
+                }
+                if (tk.getMethod("isSuccessful").invoke(task) as Boolean) {
+                    val res = tk.getMethod("getResult").invoke(task)!!
+                    val rc = Class.forName(base + "AssetPackStates", true, cl)
+                    val map = rc.getMethod("packStates").invoke(res) as Map<*, *>
+                    val sc = Class.forName(base + "AssetPackState", true, cl)
+                    for ((k, v) in map) {
+                        android.util.Log.i(tag, "pack report: state($k) status=" + sc.getMethod("status").invoke(v) +
+                            " error=" + sc.getMethod("errorCode").invoke(v) +
+                            " bytes=" + sc.getMethod("bytesDownloaded").invoke(v) + "/" +
+                            sc.getMethod("totalBytesToDownload").invoke(v))
+                    }
+                    android.util.Log.i(tag, "pack report: ${map.size} pack states")
+                } else {
+                    android.util.Log.i(tag, "pack report: getPackStates failed: " + tk.getMethod("getException").invoke(task))
+                }
+            } catch (t: Throwable) {
+                android.util.Log.w(tag, "pack report failed: ${t.cause ?: t}")
+            }
+        }.start()
+    }
 }
