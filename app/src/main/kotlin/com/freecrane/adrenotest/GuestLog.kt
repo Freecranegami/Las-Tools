@@ -23,7 +23,7 @@ object GuestLog {
         "RenderInspector", "MIUINDBG", "Perf    :", "GameSDKManager",
         "framework-connectivity", "PackageParser",
         // big crash-report blocks we don't need
-        "runtime.cc:761", "NOTE:", "CRASH   :     x", "DEBUG   :     x",
+        "runtime.cc:761", "verification.cc", "MemMap", "NOTE:", "CRASH   :     x", "DEBUG   :     x",
         "CRASH   :     lr", "DEBUG   :     lr", "Tombstone written"
     )
 
