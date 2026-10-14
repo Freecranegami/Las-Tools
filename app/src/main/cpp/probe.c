@@ -457,6 +457,7 @@ Java_com_freecrane_adrenotest_Native_openCustom(JNIEnv *env, jobject thiz,
 
 /* ---------- which classes can a native thread find? ---------- */
 #include <pthread.h>
+#include <stdarg.h>
 #include <android/log.h>
 #define GLOG(...) __android_log_print(ANDROID_LOG_INFO, "GuestHost", __VA_ARGS__)
 
@@ -503,9 +504,25 @@ static jobject g_game_loader = NULL;
 static jclass g_class_class = NULL;
 static jmethodID g_for_name = NULL;
 
+/* ring buffer of the most recent JNI lookups, dumped when the game passes null to GetObjectClass */
+#define RING_N 96
+static char g_ring[RING_N][200];
+static unsigned g_ring_i = 0;
+static void rec(const char *fmt, ...) {
+    unsigned i = __atomic_fetch_add(&g_ring_i, 1, __ATOMIC_RELAXED) % RING_N;
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(g_ring[i], sizeof g_ring[i], fmt, ap);
+    va_end(ap);
+}
+static void ring_dump(void) {
+    unsigned n = g_ring_i;
+    unsigned start = n > RING_N ? n - RING_N : 0;
+    for (unsigned k = start; k < n; k++) GLOG("jni-trace %s", g_ring[k % RING_N]);
+}
+
 static jclass hooked_FindClass(JNIEnv *env, const char *name) {
     jclass c = g_orig_find(env, name);
-    if (c) return c;
+    if (c) { rec("FindClass %s ok", name ? name : "?"); return c; }
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     if (!g_game_loader || !name) return NULL;
     char dotted[256];
@@ -515,8 +532,55 @@ static jclass hooked_FindClass(JNIEnv *env, const char *name) {
     jstring s = (*env)->NewStringUTF(env, dotted);
     jobject r = (*env)->CallStaticObjectMethod(env, g_class_class, g_for_name, s, JNI_TRUE, g_game_loader);
     (*env)->DeleteLocalRef(env, s);
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); rec("FindClass %s NOT FOUND", name); return NULL; }
+    rec("FindClass %s via game loader %s", name, r ? "ok" : "null");
     return (jclass)r;
+}
+
+typedef jmethodID (*GetMidFn)(JNIEnv *, jclass, const char *, const char *);
+typedef jfieldID (*GetFidFn)(JNIEnv *, jclass, const char *, const char *);
+typedef jobject (*GetSObjFn)(JNIEnv *, jclass, jfieldID);
+typedef jobject (*GetObjFn)(JNIEnv *, jobject, jfieldID);
+typedef jclass (*GetObjClsFn)(JNIEnv *, jobject);
+static GetMidFn o_getmid, o_getsmid;
+static GetFidFn o_getfid, o_getsfid;
+static GetSObjFn o_getsobj;
+static GetObjFn o_getobj;
+static GetObjClsFn o_getobjcls;
+
+static jmethodID h_getmid(JNIEnv *e, jclass c, const char *n, const char *sg) {
+    jmethodID r = o_getmid(e, c, n, sg); rec("GetMethodID %s %s -> %p", n, sg, r); return r; }
+static jmethodID h_getsmid(JNIEnv *e, jclass c, const char *n, const char *sg) {
+    jmethodID r = o_getsmid(e, c, n, sg); rec("GetStaticMethodID %s %s -> %p", n, sg, r); return r; }
+static jfieldID h_getfid(JNIEnv *e, jclass c, const char *n, const char *sg) {
+    jfieldID r = o_getfid(e, c, n, sg); rec("GetFieldID %s %s -> %p", n, sg, r); return r; }
+static jfieldID h_getsfid(JNIEnv *e, jclass c, const char *n, const char *sg) {
+    jfieldID r = o_getsfid(e, c, n, sg); rec("GetStaticFieldID %s %s -> %p", n, sg, r); return r; }
+static jobject h_getsobj(JNIEnv *e, jclass c, jfieldID f) {
+    jobject r = o_getsobj(e, c, f); rec("GetStaticObjectField %p -> %s", f, r ? "obj" : "NULL"); return r; }
+static jobject h_getobj(JNIEnv *e, jobject o, jfieldID f) {
+    jobject r = o_getobj(e, o, f); rec("GetObjectField %p -> %s", f, r ? "obj" : "NULL"); return r; }
+static jclass h_getobjcls(JNIEnv *e, jobject o) {
+    if (!o) {
+        Dl_info di; memset(&di, 0, sizeof di);
+        void *ra = __builtin_return_address(0);
+        dladdr(ra, &di);
+        GLOG("jni-trace GetObjectClass(NULL) from %s+0x%lx", di.dli_fname ? di.dli_fname : "?",
+             (unsigned long)((char *)ra - (char *)di.dli_fbase));
+        ring_dump();
+    }
+    return o_getobjcls(e, o);
+}
+
+static int patch_slot(void **slot, void *fn, void **orig) {
+    if (*slot == fn) return 0;
+    long pg = sysconf(_SC_PAGESIZE);
+    void *page = (void *)((uintptr_t)slot & ~(uintptr_t)(pg - 1));
+    if (mprotect(page, pg, PROT_READ | PROT_WRITE) != 0) return -1;
+    *orig = *slot;
+    *slot = fn;
+    mprotect(page, pg, PROT_READ);
+    return 0;
 }
 
 JNIEXPORT jstring JNICALL
@@ -533,12 +597,14 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
     }
     void **slot = (void **)&(*env)->FindClass;
     if (*slot == (void *)hooked_FindClass) return (*env)->NewStringUTF(env, "FindClass hook already installed");
-    long pg = sysconf(_SC_PAGESIZE);
-    void *page = (void *)((uintptr_t)slot & ~(uintptr_t)(pg - 1));
-    if (mprotect(page, pg, PROT_READ | PROT_WRITE) != 0)
+    if (patch_slot(slot, (void *)hooked_FindClass, (void **)&g_orig_find) != 0)
         return (*env)->NewStringUTF(env, "FindClass hook failed: mprotect");
-    g_orig_find = (FindClassFn)*slot;
-    *slot = (void *)hooked_FindClass;
-    mprotect(page, pg, PROT_READ);
+    patch_slot((void **)&(*env)->GetMethodID, (void *)h_getmid, (void **)&o_getmid);
+    patch_slot((void **)&(*env)->GetStaticMethodID, (void *)h_getsmid, (void **)&o_getsmid);
+    patch_slot((void **)&(*env)->GetFieldID, (void *)h_getfid, (void **)&o_getfid);
+    patch_slot((void **)&(*env)->GetStaticFieldID, (void *)h_getsfid, (void **)&o_getsfid);
+    patch_slot((void **)&(*env)->GetStaticObjectField, (void *)h_getsobj, (void **)&o_getsobj);
+    patch_slot((void **)&(*env)->GetObjectField, (void *)h_getobj, (void **)&o_getobj);
+    patch_slot((void **)&(*env)->GetObjectClass, (void *)h_getobjcls, (void **)&o_getobjcls);
     return (*env)->NewStringUTF(env, "FindClass hook installed");
 }
