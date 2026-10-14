@@ -76,4 +76,35 @@ object GuestInspect {
             Log.i(TAG, "probe ${m.name}() -> $result")
         }
     }
+
+    // Call the game's Play Core entry point ourselves and log what happens, since the game's
+    // native thread hides the Java error behind a JNI abort.
+    fun probePlay(a: android.app.Activity) {
+        val tag = "GuestHost"
+        for ((label, ctx) in listOf<Pair<String, android.content.Context>>(
+            "activity" to a, "base" to a.baseContext)) {
+            try {
+                val f = Class.forName("com.google.android.play.core.assetpacks.AssetPackManagerFactory",
+                    true, a.javaClass.classLoader)
+                val m = f.getMethod("getInstance", android.content.Context::class.java)
+                val r = m.invoke(null, ctx)
+                android.util.Log.i(tag, "play probe($label): AssetPackManagerFactory.getInstance -> $r")
+                if (r != null) {
+                    val st = r.javaClass.getMethod("getPackStates", java.util.List::class.java)
+                        .invoke(r, listOf("install_time"))
+                    android.util.Log.i(tag, "play probe($label): getPackStates -> $st")
+                }
+            } catch (t: Throwable) {
+                val c = t.cause ?: t
+                android.util.Log.w(tag, "play probe($label) failed: $c at " +
+                    c.stackTrace.take(6).joinToString(" < "))
+            }
+        }
+        for (n in listOf("getPackageName", "getApplicationContext", "getAssets", "getPackageManager", "getClassLoader")) {
+            try {
+                val v = a.javaClass.getMethod(n).invoke(a)
+                android.util.Log.i(tag, "ctx probe $n -> ${v?.javaClass?.name}")
+            } catch (t: Throwable) { android.util.Log.w(tag, "ctx probe $n failed: $t") }
+        }
+    }
 }
