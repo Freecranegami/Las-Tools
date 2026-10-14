@@ -32,6 +32,9 @@ object GuestRuntime {
     }
 
     @Volatile
+    @Volatile
+    var splitNames: Array<String> = emptyArray()
+
     var current: Guest? = null
         private set
 
@@ -107,6 +110,18 @@ object GuestRuntime {
             ai.splitSourceDirs = splits
             ai.splitPublicSourceDirs = splits
         }
+        // Describe the splits the way Android does for an installed app, so libraries that ask
+        // "which splits (asset packs) are installed?" see the ones that are on disk.
+        val names = Util.guestSplits(root).map {
+            it.name.removeSuffix(".apk").removePrefix("split_").removePrefix("split-")
+        }.toTypedArray()
+        splitNames = names
+        try {
+            val f = ApplicationInfo::class.java.getDeclaredField("splitNames")
+            f.isAccessible = true
+            f.set(ai, names)
+        } catch (t: Throwable) { Log.w(TAG, "could not set the split names: $t") }
+        Log.i(TAG, "split names: " + names.joinToString(","))
         ai.nativeLibraryDir = libDir.path
         ai.dataDir = File(app.filesDir, "guestdata/$pkg").apply { mkdirs() }.path
         val res = pm.getResourcesForApplication(ai)

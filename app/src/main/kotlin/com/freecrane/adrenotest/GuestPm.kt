@@ -68,6 +68,11 @@ object GuestPm {
                 return try {
                     val pi = pm.getPackageArchiveInfo(g.apk.path, flags.toInt()) ?: return null
                     pi.applicationInfo = g.ai
+                    val sn = GuestRuntime.splitNames
+                    if (sn.isNotEmpty()) {
+                        pi.splitNames = sn
+                        pi.splitRevisionCodes = IntArray(sn.size)
+                    }
                     infos[flags] = pi
                     pi
                 } catch (t: Throwable) {
