@@ -33,6 +33,21 @@ class GuestContext(base: Context, private val g: GuestRuntime.Guest) : ContextWr
         return pm
     }
 
+    // Some system services identify the caller by the package name of the context they were made
+    // for. The game mode service refuses a package that is not installed, so hand out this app's own.
+    override fun getSystemService(name: String): Any? {
+        if (name == "game") {
+            try {
+                val r = HostApp.instance.getSystemService(name)
+                Log.i(TAG, "game mode service from the host app: " + (r != null))
+                if (r != null) return r
+            } catch (t: Throwable) {
+                Log.w(TAG, "game mode service lookup failed: $t")
+            }
+        }
+        return super.getSystemService(name)
+    }
+
     companion object {
         private const val TAG = "GuestHost"
 
