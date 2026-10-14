@@ -81,6 +81,16 @@ object GuestPm {
             val a: Array<out Any?> = args ?: emptyArray()
             val cn = a.firstOrNull { it is ComponentName } as ComponentName?
             val mine = (cn != null && cn.packageName == g.pkg) || a.any { it is String && it == g.pkg }
+            // The game's libraries build component names from whichever context they were given,
+            // which can carry this app's package name with a class that only exists in the game.
+            val gameComponent = cn != null &&
+                (cn.packageName == g.pkg || !cn.className.startsWith("com.freecrane.adrenotest"))
+            if (gameComponent && (m.name == "setComponentEnabledSetting" ||
+                        m.name == "getComponentEnabledSetting")) {
+                note(m, a, "-> game component, answered here")
+                return if (m.name == "setComponentEnabledSetting") null
+                       else PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+            }
             if (mine) {
                 when (m.name) {
                     "getComponentEnabledSetting" -> {
