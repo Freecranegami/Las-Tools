@@ -22,6 +22,19 @@ class HostApp : Application() {
         false
     }
 
+    // The game (and Play Core) reaches us through getApplicationContext(), so this app's own
+    // package manager has to answer for the game too.
+    override fun getPackageManager(): android.content.pm.PackageManager {
+        val pm = super.getPackageManager()
+        try {
+            val g = GuestRuntime.current
+            if (g != null && inGuestProcess()) GuestPm.install(pm, g)
+        } catch (t: Throwable) {
+            Log.w("GuestHost", "host package manager hook failed: $t")
+        }
+        return pm
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
