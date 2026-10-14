@@ -548,10 +548,22 @@ static GetSObjFn o_getsobj;
 static GetObjFn o_getobj;
 static GetObjClsFn o_getobjcls;
 
+#define MID_N 1024
+static struct { jmethodID id; char txt[96]; } g_mids[MID_N];
+static unsigned g_mid_i = 0;
+static void mid_note(jmethodID id, const char *n, const char *sg) {
+    unsigned i = __atomic_fetch_add(&g_mid_i, 1, __ATOMIC_RELAXED) % MID_N;
+    g_mids[i].id = id;
+    snprintf(g_mids[i].txt, sizeof g_mids[i].txt, "%s%s", n, sg);
+}
+static const char *mid_name(jmethodID id) {
+    for (int i = 0; i < MID_N; i++) if (g_mids[i].id == id) return g_mids[i].txt;
+    return "?";
+}
 static jmethodID h_getmid(JNIEnv *e, jclass c, const char *n, const char *sg) {
-    jmethodID r = o_getmid(e, c, n, sg); rec("GetMethodID %s %s -> %p", n, sg, r); return r; }
+    jmethodID r = o_getmid(e, c, n, sg); mid_note(r, n, sg); rec("GetMethodID %s %s -> %p", n, sg, r); return r; }
 static jmethodID h_getsmid(JNIEnv *e, jclass c, const char *n, const char *sg) {
-    jmethodID r = o_getsmid(e, c, n, sg); rec("GetStaticMethodID %s %s -> %p", n, sg, r); return r; }
+    jmethodID r = o_getsmid(e, c, n, sg); mid_note(r, n, sg); rec("GetStaticMethodID %s %s -> %p", n, sg, r); return r; }
 static jfieldID h_getfid(JNIEnv *e, jclass c, const char *n, const char *sg) {
     jfieldID r = o_getfid(e, c, n, sg); rec("GetFieldID %s %s -> %p", n, sg, r); return r; }
 static jfieldID h_getsfid(JNIEnv *e, jclass c, const char *n, const char *sg) {
@@ -571,6 +583,39 @@ static jclass h_getobjcls(JNIEnv *e, jobject o) {
     }
     return o_getobjcls(e, o);
 }
+
+static void after_obj(JNIEnv *e, const char *kind, jmethodID m, jobject r) {
+    rec("%s %s -> %s", kind, mid_name(m), r ? "obj" : "NULL");
+    if (!r && (*e)->ExceptionCheck(e)) {
+        jthrowable t = (*e)->ExceptionOccurred(e);
+        (*e)->ExceptionClear(e);
+        jclass tc = (*e)->FindClass(e, "java/lang/Throwable");
+        jmethodID ts = (*e)->GetMethodID(e, tc, "toString", "()Ljava/lang/String;");
+        jstring js = (jstring)(*e)->CallObjectMethod(e, t, ts);
+        if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+        const char *u = js ? (*e)->GetStringUTFChars(e, js, NULL) : NULL;
+        rec("   java exception: %.150s", u ? u : "?");
+        if (u) (*e)->ReleaseStringUTFChars(e, js, u);
+        (*e)->Throw(e, t);
+    }
+}
+static jobject h_csom(JNIEnv *e, jclass c, jmethodID m, ...) {
+    va_list ap; va_start(ap, m);
+    jobject r = (*e)->CallStaticObjectMethodV(e, c, m, ap);
+    va_end(ap); after_obj(e, "CallStaticObjectMethod", m, r); return r;
+}
+static jobject h_com(JNIEnv *e, jobject o, jmethodID m, ...) {
+    va_list ap; va_start(ap, m);
+    jobject r = (*e)->CallObjectMethodV(e, o, m, ap);
+    va_end(ap); after_obj(e, "CallObjectMethod", m, r); return r;
+}
+typedef jobject (*CallSOA)(JNIEnv *, jclass, jmethodID, const jvalue *);
+typedef jobject (*CallOA)(JNIEnv *, jobject, jmethodID, const jvalue *);
+static CallSOA o_csoa; static CallOA o_coa;
+static jobject h_csoa(JNIEnv *e, jclass c, jmethodID m, const jvalue *a) {
+    jobject r = o_csoa(e, c, m, a); after_obj(e, "CallStaticObjectMethodA", m, r); return r; }
+static jobject h_coa(JNIEnv *e, jobject o, jmethodID m, const jvalue *a) {
+    jobject r = o_coa(e, o, m, a); after_obj(e, "CallObjectMethodA", m, r); return r; }
 
 static int patch_slot(void **slot, void *fn, void **orig) {
     if (*slot == fn) return 0;
@@ -606,5 +651,10 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
     patch_slot((void **)&(*env)->GetStaticObjectField, (void *)h_getsobj, (void **)&o_getsobj);
     patch_slot((void **)&(*env)->GetObjectField, (void *)h_getobj, (void **)&o_getobj);
     patch_slot((void **)&(*env)->GetObjectClass, (void *)h_getobjcls, (void **)&o_getobjcls);
+    { void *dummy;
+      patch_slot((void **)&(*env)->CallStaticObjectMethod, (void *)h_csom, &dummy);
+      patch_slot((void **)&(*env)->CallObjectMethod, (void *)h_com, &dummy);
+      patch_slot((void **)&(*env)->CallStaticObjectMethodA, (void *)h_csoa, (void **)&o_csoa);
+      patch_slot((void **)&(*env)->CallObjectMethodA, (void *)h_coa, (void **)&o_coa); }
     return (*env)->NewStringUTF(env, "FindClass hook installed");
 }
