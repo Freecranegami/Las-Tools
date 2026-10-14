@@ -49,6 +49,27 @@ class GuestContext(base: Context, private val g: GuestRuntime.Guest) : ContextWr
         // Runs after the system has attached a game's activity and before its onCreate.
         // Swaps the activity's base context for the game's, and drops anything the
         // activity already cached from our own context during attach.
+        // The game's native code asks the activity class for getActivity()/getContext(), which read
+        // static fields normally filled in by the game's own startup. Fill them before it runs.
+        private fun seedStatics(a: Activity) {
+            var c: Class<*>? = a.javaClass
+            while (c != null && c != Activity::class.java) {
+                for (f in c.declaredFields) {
+                    if (!java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+                    if (java.lang.reflect.Modifier.isFinal(f.modifiers)) continue
+                    val v: Any? = when {
+                        f.name.contains("activity", true) && f.type.isAssignableFrom(a.javaClass) -> a
+                        f.name.contains("context", true) && f.type.isAssignableFrom(a.javaClass) -> a
+                        else -> null
+                    }
+                    if (v == null) continue
+                    try { f.isAccessible = true; if (f.get(null) == null) { f.set(null, v); Log.i(TAG, "seeded ${c.simpleName}.${f.name}") } }
+                    catch (e: Throwable) { Log.w(TAG, "seed ${f.name} failed: $e") }
+                }
+                c = c.superclass
+            }
+        }
+
         fun install(a: Activity) {
             val g = GuestRuntime.current ?: return
             if (a.javaClass.classLoader !== g.loader) return
@@ -61,6 +82,7 @@ class GuestContext(base: Context, private val g: GuestRuntime.Guest) : ContextWr
             val app = if (gameApp != null) setField(Activity::class.java, "mApplication", a, gameApp) else true
             Log.i(TAG, "game context installed for ${a.javaClass.name}: " +
                 "base=$base resources=$res theme=$theme inflater=$infl application=$app")
+            seedStatics(a)
         }
     }
 }
