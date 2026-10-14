@@ -662,6 +662,21 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
     if (*slot == (void *)hooked_FindClass) return (*env)->NewStringUTF(env, "FindClass hook already installed");
     if (patch_slot(slot, (void *)hooked_FindClass, (void **)&g_orig_find) != 0)
         return (*env)->NewStringUTF(env, "FindClass hook failed: mprotect");
-    /* the JNI trace hooks (GetMethodID, Call*ObjectMethod, ...) were diagnostics; they stay off */
+    /* Build 32 ran with these hooks on and was the one build that showed a gradient; the builds
+     * without them stayed black. They are back on while we find out why. */
+    patch_slot((void **)&(*env)->GetMethodID, (void *)h_getmid, (void **)&o_getmid);
+    patch_slot((void **)&(*env)->GetStaticMethodID, (void *)h_getsmid, (void **)&o_getsmid);
+    patch_slot((void **)&(*env)->GetFieldID, (void *)h_getfid, (void **)&o_getfid);
+    patch_slot((void **)&(*env)->GetStaticFieldID, (void *)h_getsfid, (void **)&o_getsfid);
+    patch_slot((void **)&(*env)->GetStaticObjectField, (void *)h_getsobj, (void **)&o_getsobj);
+    patch_slot((void **)&(*env)->GetObjectField, (void *)h_getobj, (void **)&o_getobj);
+    patch_slot((void **)&(*env)->GetObjectClass, (void *)h_getobjcls, (void **)&o_getobjcls);
+    patch_slot((void **)&(*env)->CallStaticObjectMethodV, (void *)h_csov, (void **)&o_csov);
+    patch_slot((void **)&(*env)->CallObjectMethodV, (void *)h_cov, (void **)&o_cov);
+    { void *dummy;
+      patch_slot((void **)&(*env)->CallStaticObjectMethod, (void *)h_csom, &dummy);
+      patch_slot((void **)&(*env)->CallObjectMethod, (void *)h_com, &dummy);
+      patch_slot((void **)&(*env)->CallStaticObjectMethodA, (void *)h_csoa, (void **)&o_csoa);
+      patch_slot((void **)&(*env)->CallObjectMethodA, (void *)h_coa, (void **)&o_coa); }
     return (*env)->NewStringUTF(env, "FindClass hook installed");
 }
