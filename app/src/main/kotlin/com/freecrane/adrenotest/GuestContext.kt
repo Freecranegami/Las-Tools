@@ -33,6 +33,17 @@ class GuestContext(base: Context, private val g: GuestRuntime.Guest) : ContextWr
         return pm
     }
 
+    override fun bindService(service: android.content.Intent, conn: android.content.ServiceConnection, flags: Int): Boolean {
+        if (GuestPm.blocksPlay(service)) return false
+        return super.bindService(service, conn, flags)
+    }
+
+    override fun bindService(service: android.content.Intent, flags: Int, executor: java.util.concurrent.Executor,
+                             conn: android.content.ServiceConnection): Boolean {
+        if (GuestPm.blocksPlay(service)) return false
+        return super.bindService(service, flags, executor, conn)
+    }
+
     // Some system services identify the caller by the package name of the context they were made
     // for. The game mode service refuses a package that is not installed, so hand out this app's own.
     override fun getSystemService(name: String): Any? {

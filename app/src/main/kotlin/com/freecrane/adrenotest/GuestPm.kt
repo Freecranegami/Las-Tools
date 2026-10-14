@@ -21,6 +21,16 @@ object GuestPm {
     private val hooked: MutableSet<PackageManager> =
         Collections.newSetFromMap(WeakHashMap<PackageManager, Boolean>())
 
+    // A normally sideloaded copy of the game runs without Play's asset delivery: Play Core simply
+    // finds no Play Store service to talk to. Make the guest see the same thing, instead of
+    // letting Play answer a package it does not know with an error the game cannot handle.
+    fun blocksPlay(intent: android.content.Intent?): Boolean {
+        val pkg = intent?.component?.packageName ?: intent?.`package`
+        val blocked = pkg == "com.android.vending" && GuestRuntime.current != null
+        if (blocked) Log.i(TAG, "bindService to the Play Store refused: " + (intent?.action ?: intent?.component))
+        return blocked
+    }
+
     @Volatile
     private var logged = 0
 
