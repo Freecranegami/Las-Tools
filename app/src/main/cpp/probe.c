@@ -668,6 +668,9 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
     patch_slot((void **)&(*env)->GetStaticMethodID, (void *)h_getsmid, (void **)&o_getsmid);
     patch_slot((void **)&(*env)->GetFieldID, (void *)h_getfid, (void **)&o_getfid);
     patch_slot((void **)&(*env)->GetStaticFieldID, (void *)h_getsfid, (void **)&o_getsfid);
+    /* Build 36: only the ID-lookup hooks above are on. The object getters and Call*Object* hooks
+     * (group B) are off, to see whether the gradient or the crash comes from them. */
+#if 0
     patch_slot((void **)&(*env)->GetStaticObjectField, (void *)h_getsobj, (void **)&o_getsobj);
     patch_slot((void **)&(*env)->GetObjectField, (void *)h_getobj, (void **)&o_getobj);
     patch_slot((void **)&(*env)->GetObjectClass, (void *)h_getobjcls, (void **)&o_getobjcls);
@@ -678,5 +681,6 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
       patch_slot((void **)&(*env)->CallObjectMethod, (void *)h_com, &dummy);
       patch_slot((void **)&(*env)->CallStaticObjectMethodA, (void *)h_csoa, (void **)&o_csoa);
       patch_slot((void **)&(*env)->CallObjectMethodA, (void *)h_coa, (void **)&o_coa); }
+#endif
     return (*env)->NewStringUTF(env, "FindClass hook installed");
 }
