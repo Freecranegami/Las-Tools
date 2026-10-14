@@ -80,6 +80,10 @@ object GuestInspect {
     // Call the game's Play Core entry point ourselves and log what happens, since the game's
     // native thread hides the Java error behind a JNI abort.
     fun probePlay(a: android.app.Activity) {
+        try {
+            Native.threadProbe("com/rockstargames/rdr/NativeGameActivity," +
+                "com/google/android/play/core/assetpacks/AssetPackManagerFactory,java/lang/String")
+        } catch (t: Throwable) { android.util.Log.w("GuestHost", "thread probe failed: $t") }
         val tag = "GuestHost"
         for ((label, ctx) in listOf<Pair<String, android.content.Context>>(
             "activity" to a, "base" to a.baseContext)) {

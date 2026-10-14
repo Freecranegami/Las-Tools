@@ -454,3 +454,38 @@ Java_com_freecrane_adrenotest_Native_openCustom(JNIEnv *env, jobject thiz,
     (*env)->ReleaseStringUTFChars(env, jname, name);
     return (*env)->NewStringUTF(env, out);
 }
+
+/* ---------- which classes can a native thread find? ---------- */
+#include <pthread.h>
+#include <android/log.h>
+#define GLOG(...) __android_log_print(ANDROID_LOG_INFO, "GuestHost", __VA_ARGS__)
+
+static JavaVM *g_vm = NULL;
+static char g_names[512];
+
+static void *thread_probe_main(void *arg) {
+    (void)arg;
+    JNIEnv *env = NULL;
+    if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) return NULL;
+    char buf[512];
+    strncpy(buf, g_names, sizeof buf - 1); buf[sizeof buf - 1] = 0;
+    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+        jclass c = (*env)->FindClass(env, tok);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        GLOG("native thread FindClass(%s) -> %s", tok, c ? "found" : "NOT FOUND");
+        if (c) (*env)->DeleteLocalRef(env, c);
+    }
+    (*g_vm)->DetachCurrentThread(g_vm);
+    return NULL;
+}
+
+/* Starts a plain native thread and reports which of the comma separated classes it can find. */
+JNIEXPORT void JNICALL
+Java_com_freecrane_adrenotest_Native_threadProbe(JNIEnv *env, jobject thiz, jstring jnames) {
+    const char *n = (*env)->GetStringUTFChars(env, jnames, NULL);
+    strncpy(g_names, n, sizeof g_names - 1); g_names[sizeof g_names - 1] = 0;
+    (*env)->ReleaseStringUTFChars(env, jnames, n);
+    (*env)->GetJavaVM(env, &g_vm);
+    pthread_t t;
+    if (pthread_create(&t, NULL, thread_probe_main, NULL) == 0) pthread_join(t, NULL);
+}

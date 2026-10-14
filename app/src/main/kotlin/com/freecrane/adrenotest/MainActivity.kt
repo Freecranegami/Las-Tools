@@ -41,6 +41,7 @@ object Native {
     ): String
 
     external fun bindShim(): String
+    external fun threadProbe(names: String)
 
     external fun openCustom(
         tmpDir: String, hookDir: String,
