@@ -489,3 +489,56 @@ Java_com_freecrane_adrenotest_Native_threadProbe(JNIEnv *env, jobject thiz, jstr
     pthread_t t;
     if (pthread_create(&t, NULL, thread_probe_main, NULL) == 0) pthread_join(t, NULL);
 }
+
+/* ---------- FindClass that also knows the game's classes ----------
+ * Native threads attached by the game look classes up with the boot loader, which cannot see
+ * a hosted game's classes. We replace FindClass in the JNI function table with a version
+ * that falls back to Class.forName(name, true, gameLoader). */
+#include <sys/mman.h>
+#include <unistd.h>
+
+typedef jclass (*FindClassFn)(JNIEnv *, const char *);
+static FindClassFn g_orig_find = NULL;
+static jobject g_game_loader = NULL;
+static jclass g_class_class = NULL;
+static jmethodID g_for_name = NULL;
+
+static jclass hooked_FindClass(JNIEnv *env, const char *name) {
+    jclass c = g_orig_find(env, name);
+    if (c) return c;
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (!g_game_loader || !name) return NULL;
+    char dotted[256];
+    size_t i = 0;
+    for (; name[i] && i < sizeof dotted - 1; i++) dotted[i] = name[i] == '/' ? '.' : name[i];
+    dotted[i] = 0;
+    jstring s = (*env)->NewStringUTF(env, dotted);
+    jobject r = (*env)->CallStaticObjectMethod(env, g_class_class, g_for_name, s, JNI_TRUE, g_game_loader);
+    (*env)->DeleteLocalRef(env, s);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
+    return (jclass)r;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject thiz, jobject loader) {
+    if (g_game_loader) {
+        (*env)->DeleteGlobalRef(env, g_game_loader);
+    }
+    g_game_loader = (*env)->NewGlobalRef(env, loader);
+    if (!g_class_class) {
+        jclass k = (*env)->FindClass(env, "java/lang/Class");
+        g_class_class = (jclass)(*env)->NewGlobalRef(env, k);
+        g_for_name = (*env)->GetStaticMethodID(env, k, "forName",
+            "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;");
+    }
+    void **slot = (void **)&(*env)->FindClass;
+    if (*slot == (void *)hooked_FindClass) return (*env)->NewStringUTF(env, "FindClass hook already installed");
+    long pg = sysconf(_SC_PAGESIZE);
+    void *page = (void *)((uintptr_t)slot & ~(uintptr_t)(pg - 1));
+    if (mprotect(page, pg, PROT_READ | PROT_WRITE) != 0)
+        return (*env)->NewStringUTF(env, "FindClass hook failed: mprotect");
+    g_orig_find = (FindClassFn)*slot;
+    *slot = (void *)hooked_FindClass;
+    mprotect(page, pg, PROT_READ);
+    return (*env)->NewStringUTF(env, "FindClass hook installed");
+}

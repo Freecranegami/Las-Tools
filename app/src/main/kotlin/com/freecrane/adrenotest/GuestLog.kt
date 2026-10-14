@@ -30,7 +30,7 @@ object GuestLog {
     private val important = listOf(
         " E ", " F ", "GuestHost", "GuestGame", "Unity", "JNI", "Abort", "signal", "vkshim",
         "CANNOT", "dlopen", "linker", "libvulkan", "libvkshim", "Vulkan", "vulkan",
-        "clns", "native thread", "play probe", "ctx probe", "Fatal", "FATAL", "Exception"
+        "clns", "native thread", "FindClass", "play probe", "ctx probe", "Fatal", "FATAL", "Exception"
     )
 
     private val frameRe = Regex("#(\\d+) pc ")
