@@ -111,4 +111,42 @@ object GuestInspect {
             } catch (t: Throwable) { android.util.Log.w(tag, "ctx probe $n failed: $t") }
         }
     }
+
+    // One-off look at the Play Core asset pack classes, so the next change uses real names.
+    fun reflectPlay(a: android.app.Activity) {
+        val tag = "GuestHost"
+        val base = "com.google.android.play.core.assetpacks."
+        val names = listOf("AssetPackManager", "AssetPackState", "AssetPackStates", "AssetPackLocation",
+            "AssetPackManagerFactory")
+        for (n in names) {
+            try {
+                val c = Class.forName(base + n, false, a.javaClass.classLoader)
+                android.util.Log.i(tag, "reflect $n: super=${c.superclass?.name} " +
+                    "interfaces=${c.interfaces.joinToString { it.simpleName }} " +
+                    "abstract=${java.lang.reflect.Modifier.isAbstract(c.modifiers)}")
+                val parts = ArrayList<String>()
+                for (m in c.declaredMethods) {
+                    val st = if (java.lang.reflect.Modifier.isStatic(m.modifiers)) "S " else ""
+                    val ab = if (java.lang.reflect.Modifier.isAbstract(m.modifiers)) "A " else ""
+                    parts.add("$st$ab${m.returnType.simpleName} ${m.name}(${m.parameterTypes.joinToString { it.simpleName }})")
+                }
+                parts.sorted().chunked(6).forEach { android.util.Log.i(tag, "reflect $n methods: " + it.joinToString("; ")) }
+                val ctors = c.declaredConstructors.joinToString("; ") { k ->
+                    "(" + k.parameterTypes.joinToString { it.simpleName } + ")" }
+                android.util.Log.i(tag, "reflect $n ctors: $ctors")
+            } catch (t: Throwable) {
+                android.util.Log.w(tag, "reflect $n failed: $t")
+            }
+        }
+        try {
+            val f = Class.forName(base + "AssetPackManagerFactory", true, a.javaClass.classLoader)
+            val mgr = f.getMethod("getInstance", android.content.Context::class.java).invoke(null, a)
+            android.util.Log.i(tag, "reflect manager impl: ${mgr?.javaClass?.name}")
+            mgr?.javaClass?.declaredMethods?.map {
+                "${it.returnType.simpleName} ${it.name}(${it.parameterTypes.joinToString { p -> p.simpleName }})"
+            }?.sorted()?.chunked(6)?.forEach { android.util.Log.i(tag, "reflect impl methods: " + it.joinToString("; ")) }
+        } catch (t: Throwable) {
+            android.util.Log.w(tag, "reflect manager failed: ${t.cause ?: t}")
+        }
+    }
 }

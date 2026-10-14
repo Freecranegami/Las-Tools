@@ -584,7 +584,10 @@ static jclass h_getobjcls(JNIEnv *e, jobject o) {
     return o_getobjcls(e, o);
 }
 
-static void after_obj(JNIEnv *e, const char *kind, jmethodID m, jobject r) {
+static jclass g_wrap_cls = NULL;
+static jmethodID g_wrap_mid = NULL;
+
+static jobject after_obj(JNIEnv *e, const char *kind, jmethodID m, jobject r) {
     rec("%s %s -> %s", kind, mid_name(m), r ? "obj" : "NULL");
     if (!r && (*e)->ExceptionCheck(e)) {
         jthrowable t = (*e)->ExceptionOccurred(e);
@@ -603,26 +606,26 @@ typedef jobject (*CallSOV)(JNIEnv *, jclass, jmethodID, va_list);
 typedef jobject (*CallOV)(JNIEnv *, jobject, jmethodID, va_list);
 static CallSOV o_csov; static CallOV o_cov;
 static jobject h_csov(JNIEnv *e, jclass c, jmethodID m, va_list ap) {
-    jobject r = o_csov(e, c, m, ap); after_obj(e, "CallStaticObjectMethodV", m, r); return r; }
+    jobject r = o_csov(e, c, m, ap); return after_obj(e, "CallStaticObjectMethodV", m, r); }
 static jobject h_cov(JNIEnv *e, jobject o, jmethodID m, va_list ap) {
-    jobject r = o_cov(e, o, m, ap); after_obj(e, "CallObjectMethodV", m, r); return r; }
+    jobject r = o_cov(e, o, m, ap); return after_obj(e, "CallObjectMethodV", m, r); }
 static jobject h_csom(JNIEnv *e, jclass c, jmethodID m, ...) {
     va_list ap; va_start(ap, m);
     jobject r = o_csov ? o_csov(e, c, m, ap) : (*e)->CallStaticObjectMethodV(e, c, m, ap);
-    va_end(ap); after_obj(e, "CallStaticObjectMethod", m, r); return r;
+    va_end(ap); return after_obj(e, "CallStaticObjectMethod", m, r);
 }
 static jobject h_com(JNIEnv *e, jobject o, jmethodID m, ...) {
     va_list ap; va_start(ap, m);
     jobject r = o_cov ? o_cov(e, o, m, ap) : (*e)->CallObjectMethodV(e, o, m, ap);
-    va_end(ap); after_obj(e, "CallObjectMethod", m, r); return r;
+    va_end(ap); return after_obj(e, "CallObjectMethod", m, r);
 }
 typedef jobject (*CallSOA)(JNIEnv *, jclass, jmethodID, const jvalue *);
 typedef jobject (*CallOA)(JNIEnv *, jobject, jmethodID, const jvalue *);
 static CallSOA o_csoa; static CallOA o_coa;
 static jobject h_csoa(JNIEnv *e, jclass c, jmethodID m, const jvalue *a) {
-    jobject r = o_csoa(e, c, m, a); after_obj(e, "CallStaticObjectMethodA", m, r); return r; }
+    jobject r = o_csoa(e, c, m, a); return after_obj(e, "CallStaticObjectMethodA", m, r); }
 static jobject h_coa(JNIEnv *e, jobject o, jmethodID m, const jvalue *a) {
-    jobject r = o_coa(e, o, m, a); after_obj(e, "CallObjectMethodA", m, r); return r; }
+    jobject r = o_coa(e, o, m, a); return after_obj(e, "CallObjectMethodA", m, r); }
 
 static int patch_slot(void **slot, void *fn, void **orig) {
     if (*slot == fn) return 0;
@@ -646,6 +649,14 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
         g_class_class = (jclass)(*env)->NewGlobalRef(env, k);
         g_for_name = (*env)->GetStaticMethodID(env, k, "forName",
             "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;");
+    }
+    if (!g_wrap_cls) {
+        jclass w = (*env)->FindClass(env, "com/freecrane/adrenotest/GuestAssetPacks");
+        if (w) {
+            g_wrap_cls = (jclass)(*env)->NewGlobalRef(env, w);
+            g_wrap_mid = (*env)->GetStaticMethodID(env, w, "wrap", "(Ljava/lang/Object;)Ljava/lang/Object;");
+        }
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     }
     void **slot = (void **)&(*env)->FindClass;
     if (*slot == (void *)hooked_FindClass) return (*env)->NewStringUTF(env, "FindClass hook already installed");

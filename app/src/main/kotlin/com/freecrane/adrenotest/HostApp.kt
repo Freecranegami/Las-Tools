@@ -49,7 +49,7 @@ private object GuestSwap : Application.ActivityLifecycleCallbacks {
     // API 29+: called after the activity is attached and before its onCreate.
     override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
         GuestContext.install(activity)
-        if (activity.javaClass.classLoader is GuestLoader) { GuestInspect.dump(activity, false); GuestInspect.probePlay(activity) }
+        if (activity.javaClass.classLoader is GuestLoader) { GuestInspect.dump(activity, false); GuestInspect.probePlay(activity); GuestInspect.reflectPlay(activity) }
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
