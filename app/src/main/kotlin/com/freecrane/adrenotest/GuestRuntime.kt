@@ -32,9 +32,9 @@ object GuestRuntime {
     }
 
     @Volatile
-    @Volatile
     var splitNames: Array<String> = emptyArray()
 
+    @Volatile
     var current: Guest? = null
         private set
 
