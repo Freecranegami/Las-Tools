@@ -599,14 +599,21 @@ static void after_obj(JNIEnv *e, const char *kind, jmethodID m, jobject r) {
         (*e)->Throw(e, t);
     }
 }
+typedef jobject (*CallSOV)(JNIEnv *, jclass, jmethodID, va_list);
+typedef jobject (*CallOV)(JNIEnv *, jobject, jmethodID, va_list);
+static CallSOV o_csov; static CallOV o_cov;
+static jobject h_csov(JNIEnv *e, jclass c, jmethodID m, va_list ap) {
+    jobject r = o_csov(e, c, m, ap); after_obj(e, "CallStaticObjectMethodV", m, r); return r; }
+static jobject h_cov(JNIEnv *e, jobject o, jmethodID m, va_list ap) {
+    jobject r = o_cov(e, o, m, ap); after_obj(e, "CallObjectMethodV", m, r); return r; }
 static jobject h_csom(JNIEnv *e, jclass c, jmethodID m, ...) {
     va_list ap; va_start(ap, m);
-    jobject r = (*e)->CallStaticObjectMethodV(e, c, m, ap);
+    jobject r = o_csov ? o_csov(e, c, m, ap) : (*e)->CallStaticObjectMethodV(e, c, m, ap);
     va_end(ap); after_obj(e, "CallStaticObjectMethod", m, r); return r;
 }
 static jobject h_com(JNIEnv *e, jobject o, jmethodID m, ...) {
     va_list ap; va_start(ap, m);
-    jobject r = (*e)->CallObjectMethodV(e, o, m, ap);
+    jobject r = o_cov ? o_cov(e, o, m, ap) : (*e)->CallObjectMethodV(e, o, m, ap);
     va_end(ap); after_obj(e, "CallObjectMethod", m, r); return r;
 }
 typedef jobject (*CallSOA)(JNIEnv *, jclass, jmethodID, const jvalue *);
@@ -651,6 +658,8 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
     patch_slot((void **)&(*env)->GetStaticObjectField, (void *)h_getsobj, (void **)&o_getsobj);
     patch_slot((void **)&(*env)->GetObjectField, (void *)h_getobj, (void **)&o_getobj);
     patch_slot((void **)&(*env)->GetObjectClass, (void *)h_getobjcls, (void **)&o_getobjcls);
+    patch_slot((void **)&(*env)->CallStaticObjectMethodV, (void *)h_csov, (void **)&o_csov);
+    patch_slot((void **)&(*env)->CallObjectMethodV, (void *)h_cov, (void **)&o_cov);
     { void *dummy;
       patch_slot((void **)&(*env)->CallStaticObjectMethod, (void *)h_csom, &dummy);
       patch_slot((void **)&(*env)->CallObjectMethod, (void *)h_com, &dummy);
