@@ -669,7 +669,8 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
     patch_slot((void **)&(*env)->GetStaticMethodID, (void *)h_getsmid, (void **)&o_getsmid);
     patch_slot((void **)&(*env)->GetFieldID, (void *)h_getfid, (void **)&o_getfid);
     patch_slot((void **)&(*env)->GetStaticFieldID, (void *)h_getsfid, (void **)&o_getsfid);
-    /* Build 37: all hooks on again, after fixing after_obj, which forgot to return its result. */
+    /* Build 37 showed these hooks make no difference (black screen with them fixed), so they are off. */
+#if 0
     patch_slot((void **)&(*env)->GetStaticObjectField, (void *)h_getsobj, (void **)&o_getsobj);
     patch_slot((void **)&(*env)->GetObjectField, (void *)h_getobj, (void **)&o_getobj);
     patch_slot((void **)&(*env)->GetObjectClass, (void *)h_getobjcls, (void **)&o_getobjcls);
@@ -680,5 +681,109 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
       patch_slot((void **)&(*env)->CallObjectMethod, (void *)h_com, &dummy);
       patch_slot((void **)&(*env)->CallStaticObjectMethodA, (void *)h_csoa, (void **)&o_csoa);
       patch_slot((void **)&(*env)->CallObjectMethodA, (void *)h_coa, (void **)&o_coa); }
+#endif
     return (*env)->NewStringUTF(env, "FindClass hook installed");
+}
+
+
+/* ---- Build 38: thread snapshot, to see where the game's threads are stuck ---- */
+#include <unwind.h>
+#include <signal.h>
+#include <sys/syscall.h>
+#include <dirent.h>
+#include <time.h>
+
+static void *g_bt[48];
+static volatile int g_bt_n = 0;
+static volatile int g_bt_done = 0;
+
+static _Unwind_Reason_Code bt_cb(struct _Unwind_Context *c, void *arg) {
+    uintptr_t pc = _Unwind_GetIP(c);
+    if (pc && g_bt_n < 48) g_bt[g_bt_n++] = (void *)pc;
+    return g_bt_n >= 48 ? _URC_END_OF_STACK : _URC_NO_REASON;
+}
+static void bt_handler(int sig) {
+    g_bt_n = 0;
+    _Unwind_Backtrace(bt_cb, NULL);
+    g_bt_done = 1;
+}
+
+static void read_small(const char *path, char *out, size_t n) {
+    out[0] = 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    size_t r = fread(out, 1, n - 1, f);
+    out[r] = 0;
+    fclose(f);
+    for (size_t i = 0; i < r; i++) if (out[i] == '\n') out[i] = ' ';
+}
+
+JNIEXPORT void JNICALL
+Java_com_freecrane_adrenotest_Native_snapshot(JNIEnv *env, jobject thiz, jstring jtag) {
+    const char *tag = (*env)->GetStringUTFChars(env, jtag, NULL);
+    GLOG("snap[%s]: begin", tag);
+
+    /* 1. graphics-related libraries the process has loaded */
+    FILE *m = fopen("/proc/self/maps", "r");
+    if (m) {
+        char line[600], seen[40][300]; int ns = 0;
+        while (fgets(line, sizeof line, m)) {
+            char *p = strchr(line, '/');
+            if (!p) continue;
+            p[strcspn(p, "\n")] = 0;
+            if (!(strstr(p, "vulkan") || strstr(p, "libEGL") || strstr(p, "GLES") || strstr(p, "turnip") ||
+                  strstr(p, "vk_") || strstr(p, "adreno") || strstr(p, "libgsl") || strstr(p, "librdr") ||
+                  strstr(p, "libplaycore") || strstr(p, "gpu") || strstr(p, "libOpenSLES") || strstr(p, "libaaudio")))
+                continue;
+            int dup = 0;
+            for (int i = 0; i < ns; i++) if (!strcmp(seen[i], p)) { dup = 1; break; }
+            if (dup || ns >= 40) continue;
+            snprintf(seen[ns++], 300, "%s", p);
+            GLOG("snap[%s]: lib %s", tag, p);
+        }
+        fclose(m);
+    }
+
+    /* 2. every thread: name, state, kernel wait point, native stack */
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_handler = bt_handler; sigemptyset(&sa.sa_mask);
+    int sig = SIGRTMIN + 4;
+    sigaction(sig, &sa, NULL);
+    pid_t pid = getpid(), me = (pid_t)syscall(SYS_gettid);
+    DIR *d = opendir("/proc/self/task");
+    struct dirent *de;
+    int count = 0;
+    while (d && (de = readdir(d))) {
+        int tid = atoi(de->d_name);
+        if (tid <= 0 || tid == me) continue;
+        char path[64], comm[64], stat[400], wch[96];
+        snprintf(path, sizeof path, "/proc/self/task/%d/comm", tid); read_small(path, comm, sizeof comm);
+        snprintf(path, sizeof path, "/proc/self/task/%d/stat", tid); read_small(path, stat, sizeof stat);
+        snprintf(path, sizeof path, "/proc/self/task/%d/wchan", tid); read_small(path, wch, sizeof wch);
+        char *st = strrchr(stat, ')'); char state = st && st[1] == ' ' ? st[2] : '?';
+        /* the runtime's own helper threads are not interesting */
+        if (strstr(comm, "HeapTask") || strstr(comm, "ReferenceQueue") || strstr(comm, "FinalizerDaemon") ||
+            strstr(comm, "FinalizerWatchd") || strstr(comm, "Jit thread") || strstr(comm, "Signal Catcher") ||
+            strstr(comm, "binder:") || strstr(comm, "Profile Saver") || strstr(comm, "perfetto") ||
+            strstr(comm, "RenderThread") || strstr(comm, "hwuiTask"))
+            continue;
+        if (++count > 40) break;
+        g_bt_done = 0; g_bt_n = 0;
+        syscall(SYS_tgkill, pid, tid, sig);
+        for (int i = 0; i < 40 && !g_bt_done; i++) { struct timespec ts = {0, 5000000}; nanosleep(&ts, NULL); }
+        char buf[900]; int o = snprintf(buf, sizeof buf, "snap[%s]: tid %d '%s' %c wchan=%s :", tag, tid, comm, state, wch);
+        if (!g_bt_done) o += snprintf(buf + o, sizeof buf - o, " (no stack)");
+        for (int i = 0; g_bt_done && i < g_bt_n && i < 14 && o < (int)sizeof buf - 120; i++) {
+            Dl_info di;
+            if (dladdr(g_bt[i], &di) && di.dli_fname) {
+                const char *base = strrchr(di.dli_fname, '/'); base = base ? base + 1 : di.dli_fname;
+                o += snprintf(buf + o, sizeof buf - o, " %s+0x%lx", base, (unsigned long)((char *)g_bt[i] - (char *)di.dli_fbase));
+                if (di.dli_sname) o += snprintf(buf + o, sizeof buf - o, "(%.40s)", di.dli_sname);
+            } else o += snprintf(buf + o, sizeof buf - o, " %p", g_bt[i]);
+        }
+        GLOG("%s", buf);
+    }
+    if (d) closedir(d);
+    GLOG("snap[%s]: end, %d threads", tag, count);
+    (*env)->ReleaseStringUTFChars(env, jtag, tag);
 }

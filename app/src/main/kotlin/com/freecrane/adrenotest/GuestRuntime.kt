@@ -98,6 +98,13 @@ object GuestRuntime {
         } catch (t: Throwable) { Log.w(TAG, "split listing failed: $t") }
         try { Log.i(TAG, Native.installFindClassHook(loader)) }
         catch (t: Throwable) { Log.w(TAG, "FindClass hook failed: $t") }
+        // Build 38: show where the game's threads are, shortly after launch and again later.
+        Thread {
+            try {
+                Thread.sleep(10_000); Native.snapshot("10s")
+                Thread.sleep(15_000); Native.snapshot("25s")
+            } catch (t: Throwable) { Log.w(TAG, "snapshot failed: $t") }
+        }.also { it.isDaemon = true; it.name = "las-snapshot" }.start()
 
         val pm = app.packageManager
         val pi = pm.getPackageArchiveInfo(apk.path, PackageManager.GET_META_DATA)
