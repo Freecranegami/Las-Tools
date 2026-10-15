@@ -739,7 +739,7 @@ Java_com_freecrane_adrenotest_Native_snapshot(JNIEnv *env, jobject thiz, jstring
             for (int i = 0; i < ns; i++) if (!strcmp(seen[i], p)) { dup = 1; break; }
             if (dup || ns >= 40) continue;
             snprintf(seen[ns++], 300, "%s", p);
-            GLOG("snap[%s]: lib %s", tag, p);
+            { const char *b = strrchr(p, '/'); GLOG("snap[%s]: lib %s", tag, b ? b + 1 : p); }
         }
         fclose(m);
     }
@@ -752,7 +752,7 @@ Java_com_freecrane_adrenotest_Native_snapshot(JNIEnv *env, jobject thiz, jstring
     pid_t pid = getpid(), me = (pid_t)syscall(SYS_gettid);
     DIR *d = opendir("/proc/self/task");
     struct dirent *de;
-    int count = 0;
+    int count = 0, idle = 0;
     while (d && (de = readdir(d))) {
         int tid = atoi(de->d_name);
         if (tid <= 0 || tid == me) continue;
@@ -781,9 +781,15 @@ Java_com_freecrane_adrenotest_Native_snapshot(JNIEnv *env, jobject thiz, jstring
                 if (di.dli_sname) o += snprintf(buf + o, sizeof buf - o, "(%.40s)", di.dli_sname);
             } else o += snprintf(buf + o, sizeof buf - o, " %p", g_bt[i]);
         }
+        /* idle helpers (waiting for work, sleeping, parked) only add noise */
+        if (strstr(buf, "JobThread") || strstr(buf, "sysThreadPool") || strstr(buf, "Thread4Park") ||
+            strstr(buf, "Monitor4Wait") || strstr(buf, "Looper") || strstr(buf, "AudioTrackThread") ||
+            strstr(buf, "SaveDataManager") || strstr(buf, "pgStreamerDeviceHandler") || strstr(buf, "(no stack)"))
+            { idle++; continue; }
         GLOG("%s", buf);
     }
     if (d) closedir(d);
+    GLOG("snap[%s]: %d idle helper threads left out", tag, idle);
     GLOG("snap[%s]: end, %d threads", tag, count);
     (*env)->ReleaseStringUTFChars(env, jtag, tag);
 }
