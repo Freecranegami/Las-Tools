@@ -771,14 +771,14 @@ Java_com_freecrane_adrenotest_Native_snapshot(JNIEnv *env, jobject thiz, jstring
         g_bt_done = 0; g_bt_n = 0;
         syscall(SYS_tgkill, pid, tid, sig);
         for (int i = 0; i < 40 && !g_bt_done; i++) { struct timespec ts = {0, 5000000}; nanosleep(&ts, NULL); }
-        char buf[900]; int o = snprintf(buf, sizeof buf, "snap[%s]: tid %d '%s' %c wchan=%s :", tag, tid, comm, state, wch);
+        char buf[2400]; int o = snprintf(buf, sizeof buf, "snap[%s]: tid %d '%s' %c wchan=%s :", tag, tid, comm, state, wch);
         if (!g_bt_done) o += snprintf(buf + o, sizeof buf - o, " (no stack)");
-        for (int i = 0; g_bt_done && i < g_bt_n && i < 14 && o < (int)sizeof buf - 120; i++) {
+        for (int i = 0; g_bt_done && i < g_bt_n && i < 22 && o < (int)sizeof buf - 160; i++) {
             Dl_info di;
             if (dladdr(g_bt[i], &di) && di.dli_fname) {
                 const char *base = strrchr(di.dli_fname, '/'); base = base ? base + 1 : di.dli_fname;
                 o += snprintf(buf + o, sizeof buf - o, " %s+0x%lx", base, (unsigned long)((char *)g_bt[i] - (char *)di.dli_fbase));
-                if (di.dli_sname) o += snprintf(buf + o, sizeof buf - o, "(%.40s)", di.dli_sname);
+                if (di.dli_sname) o += snprintf(buf + o, sizeof buf - o, "(%.110s)", di.dli_sname);
             } else o += snprintf(buf + o, sizeof buf - o, " %p", g_bt[i]);
         }
         /* idle helpers (waiting for work, sleeping, parked) only add noise */
