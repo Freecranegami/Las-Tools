@@ -58,8 +58,7 @@ object GuestRuntime {
         val candidates = listOf(
             File(libDir, "lib$lib.so"),
             File(libDir, lib),
-            File(libDir, "lib" + lib.removePrefix("lib").removeSuffix(".so") + ".so")
-        )
+            File(libDir, "lib" + lib.removePrefix("lib").removeSuffix(".so") + ".so"))
         return candidates.firstOrNull { it.exists() }?.path
     }
 
@@ -99,13 +98,6 @@ object GuestRuntime {
         } catch (t: Throwable) { Log.w(TAG, "split listing failed: $t") }
         try { Log.i(TAG, Native.installFindClassHook(loader)) }
         catch (t: Throwable) { Log.w(TAG, "FindClass hook failed: $t") }
-        // Build 38: show where the game's threads are, shortly after launch and again later.
-        Thread {
-            try {
-                Thread.sleep(10_000); Native.snapshot("10s")
-                Thread.sleep(15_000); Native.snapshot("25s")
-            } catch (t: Throwable) { Log.w(TAG, "snapshot failed: $t") }
-        }.also { it.isDaemon = true; it.name = "las-snapshot" }.start()
 
         val pm = app.packageManager
         val pi = pm.getPackageArchiveInfo(apk.path, PackageManager.GET_META_DATA)
@@ -183,101 +175,5 @@ object GuestRuntime {
             Log.e(TAG, "the game's Application failed to start", t)
             throw t
         }
-        hookAssetPackManager(g)
-    }
-
-    // Background-thread hook: waits for the game's AssetPackManager to appear in Play
-    // Core's static cache, then replaces it with the GuestAssetPacks proxy.
-    // Searches broadly: static fields of type AssetPackManager, Map-valued cache fields,
-    // and fields on the game's Application instance.
-    private fun hookAssetPackManager(g: Guest) {
-        Thread {
-            val mgrClassName = "com.google.android.play.core.assetpacks.AssetPackManager"
-            var attempts = 0
-            var done = false
-            while (attempts < 40 && !done) {
-                attempts++
-                try {
-                    val mgrClass = Class.forName(mgrClassName, false, g.loader)
-
-                    // Strategy 1: static field directly holding an AssetPackManager instance.
-                    for (f in mgrClass.declaredFields) {
-                        if (!java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
-                        f.isAccessible = true
-                        val v = f.get(null) ?: continue
-                        if (mgrClass.isInstance(v) && v !is java.lang.reflect.Proxy) {
-                            Log.i(TAG, "asset packs: found static field ${f.name} -> ${v.javaClass.name}")
-                            val wrapped = GuestAssetPacks.wrap(v)
-                            if (wrapped !== v) {
-                                f.set(null, wrapped)
-                                Log.i(TAG, "asset packs: static field ${f.name} replaced with proxy")
-                                done = true
-                            }
-                            break
-                        }
-                    }
-
-                    // Strategy 2: static Map field holding cached instances.
-                    if (!done) {
-                        val mapField = mgrClass.declaredFields.firstOrNull { f ->
-                            java.lang.reflect.Modifier.isStatic(f.modifiers) &&
-                                java.util.Map::class.java.isAssignableFrom(f.type)
-                        }
-                        if (mapField != null) {
-                            mapField.isAccessible = true
-                            @Suppress("UNCHECKED_CAST")
-                            val cache = mapField.get(null) as? MutableMap<Any?, Any?>
-                            if (cache != null) {
-                                for ((key, value) in cache) {
-                                    if (value == null) continue
-                                    if (value.javaClass.name.contains("AssetPackManager") &&
-                                        value !is java.lang.reflect.Proxy) {
-                                        Log.i(TAG, "asset packs: found in map field ${mapField.name} (key=$key)")
-                                        val wrapped = GuestAssetPacks.wrap(value)
-                                        if (wrapped !== value) {
-                                            cache[key] = wrapped
-                                            Log.i(TAG, "asset packs: map entry replaced with proxy")
-                                            done = true
-                                        }
-                                        break
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Strategy 3: scan the game's Application instance for fields holding a manager.
-                    if (!done && g.app != null) {
-                        var c: Class<*>? = g.app.javaClass
-                        while (c != null && c != Application::class.java) {
-                            for (f in c.declaredFields) {
-                                f.isAccessible = true
-                                val v = try { f.get(g.app) } catch (t: Throwable) { continue } ?: continue
-                                if (mgrClass.isInstance(v) && v !is java.lang.reflect.Proxy) {
-                                    Log.i(TAG, "asset packs: found manager in app field ${c.simpleName}.${f.name}")
-                                    val wrapped = GuestAssetPacks.wrap(v)
-                                    if (wrapped !== v) {
-                                        f.set(g.app, wrapped)
-                                        Log.i(TAG, "asset packs: app field replaced with proxy")
-                                        done = true
-                                        break
-                                    }
-                                }
-                            }
-                            if (done) break
-                            c = c.superclass
-                        }
-                    }
-
-                    if (!done && attempts % 10 == 0) {
-                        Log.i(TAG, "asset packs: still waiting for manager (attempt $attempts)")
-                    }
-                } catch (t: Throwable) {
-                    Log.w(TAG, "asset packs: hook attempt $attempts failed: $t")
-                }
-                if (!done) Thread.sleep(400)
-            }
-            if (!done) Log.w(TAG, "asset packs: gave up waiting after $attempts attempts")
-        }.also { it.isDaemon = true; it.name = "las-pack-hook" }.start()
     }
 }
