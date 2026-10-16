@@ -173,6 +173,16 @@ object GuestInspect {
                         }
                     } catch (t: Throwable) { android.util.Log.w(tag, "pack report: location($n) failed: ${t.cause ?: t}") }
                 }
+                try {
+                    val m = mc.getMethod("getPackLocations").invoke(mgr) as? Map<*, *>
+                    android.util.Log.i(tag, "pack report: getPackLocations = " + (m?.keys?.toString() ?: "null"))
+                } catch (t: Throwable) { android.util.Log.w(tag, "pack report: getPackLocations failed: ${t.cause ?: t}") }
+                for ((n, asset) in listOf("data0" to "data/act_android.rpf", "data1" to "data/strings_android.rpf", "game3" to "game/base/content_android.rpf")) {
+                    try {
+                        val al = mc.getMethod("getAssetLocation", String::class.java, String::class.java).invoke(mgr, n, asset)
+                        android.util.Log.i(tag, "pack report: assetLocation($n, $asset) = " + (al ?: "null"))
+                    } catch (t: Throwable) { android.util.Log.w(tag, "pack report: assetLocation($n) failed: ${t.cause ?: t}") }
+                }
                 val task = mc.getMethod("getPackStates", java.util.List::class.java).invoke(mgr, names)!!
                 val tk = Class.forName("com.google.android.gms.tasks.Task", true, cl)
                 var waited = 0

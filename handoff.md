@@ -1,7 +1,6 @@
-> **Update (rollback):** `main` was rolled back to the Build 35 code in commit `6490315`. Everything below that
-> describes Builds 36-40 (the `return r;` fix, the thread snapshot, the longer symbol names, the `getPackLocations`
-> probes) and the later asset-pack bypass commits is **not in the current code**. The history is still in git, and
-> `git revert 6490315` restores it. Build 35 still has the missing `return r;` bug in `after_obj()` in `probe.c`.
+> **Update:** `main` was rolled back to Build 35 (`6490315`) and then restored to the Build 40 code (`9e5339a`).
+> The seven asset-pack bypass commits after Build 40 (`0a4c472` to `b66bcd6`) are not in the code, but they are
+> still in git history.
 
 # Handoff: Las Tools / Red Dead Redemption stuck on a black screen
 

@@ -43,6 +43,7 @@ object Native {
     external fun bindShim(): String
     external fun threadProbe(names: String)
     external fun installFindClassHook(loader: ClassLoader): String
+    external fun snapshot(tag: String)
 
     external fun openCustom(
         tmpDir: String, hookDir: String,
