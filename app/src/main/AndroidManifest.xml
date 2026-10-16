@@ -24,18 +24,21 @@
         <activity
             android:name=".GuestActivity"
             android:process=":guest"
+            android:screenOrientation="sensorLandscape"
             android:exported="false"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|layoutDirection|locale" />
         <activity
             android:name=".GuestNativeActivity"
             android:process=":guest"
+            android:screenOrientation="sensorLandscape"
             android:exported="false"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density" />
         <activity
             android:name=".GuestProxyActivity"
             android:process=":guest"
+            android:screenOrientation="sensorLandscape"
             android:exported="false"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|layoutDirection|locale" />

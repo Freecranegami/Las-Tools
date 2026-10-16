@@ -22,7 +22,7 @@ object GuestLog {
         "system_exposed_libraries", "SurfaceSyncer", "SurfaceView", "InsetsController",
         "RenderInspector", "MIUINDBG", "Perf    :", "GameSDKManager",
         "framework-connectivity", "PackageParser",
-        "asset in ", "reflect impl methods", "NativeGameActivity methods", "AudioTrack]",
+        "asset in ", "reflect impl methods", "NativeGameActivity methods", "audioTrackData",
         // big crash-report blocks we don't need
         "runtime.cc:761", "verification.cc", "MemMap", "NOTE:", "CRASH   :     x", "DEBUG   :     x",
         "CRASH   :     lr", "DEBUG   :     lr", "Tombstone written"
@@ -41,7 +41,10 @@ object GuestLog {
     fun read(): String {
         val raw = try {
             val p = ProcessBuilder(
-                "logcat", "-d", "-b", "main", "-b", "system", "-b", "crash", "-t", "8000")
+                "logcat", "-d", "-b", "main", "-b", "system", "-b", "crash", "-t", "30000",
+                // only the tags that matter, so a long black screen does not push the launch out of range
+                "*:S", "GuestHost:V", "PlayCore:V", "playcore:V", "libc:V", "DEBUG:V", "AndroidRuntime:V",
+                "nativeloader:D", "ActivityThread:E", "art:W")
                 .redirectErrorStream(true).start()
             p.inputStream.bufferedReader().readText()
         } catch (e: Throwable) {
