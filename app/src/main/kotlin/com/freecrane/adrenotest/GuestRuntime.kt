@@ -183,59 +183,101 @@ object GuestRuntime {
             Log.e(TAG, "the game's Application failed to start", t)
             throw t
         }
-        // The game creates its AssetPackManager during/after onCreate and caches it in a
-        // static field. Wrap that instance so all Play Core pack queries are answered
-        // from the local split files on disk, never from the (absent) Play Store service.
         hookAssetPackManager(g)
     }
 
     // Background-thread hook: waits for the game's AssetPackManager to appear in Play
-    // Core's static cache, then replaces it with the GuestAssetPacks proxy. Retries
-    // because the manager is often created a moment after onCreate returns.
+    // Core's static cache, then replaces it with the GuestAssetPacks proxy.
+    // Searches broadly: static fields of type AssetPackManager, Map-valued cache fields,
+    // and fields on the game's Application instance.
     private fun hookAssetPackManager(g: Guest) {
         Thread {
             val mgrClassName = "com.google.android.play.core.assetpacks.AssetPackManager"
             var attempts = 0
-            while (attempts < 30) {
+            var done = false
+            while (attempts < 40 && !done) {
                 attempts++
-                Thread.sleep(400)
                 try {
                     val mgrClass = Class.forName(mgrClassName, false, g.loader)
-                    // Find a static field that is a Map and might hold the cached instance.
-                    val cacheField = mgrClass.declaredFields.firstOrNull { f ->
-                        java.lang.reflect.Modifier.isStatic(f.modifiers) &&
-                            (f.type == java.util.Map::class.java ||
-                             f.type.name.startsWith("java.util.Map") ||
-                             f.type.simpleName.contains("Map"))
+
+                    // Strategy 1: static field directly holding an AssetPackManager instance.
+                    for (f in mgrClass.declaredFields) {
+                        if (!java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+                        f.isAccessible = true
+                        val v = f.get(null) ?: continue
+                        if (mgrClass.isInstance(v) && v !is java.lang.reflect.Proxy) {
+                            Log.i(TAG, "asset packs: found static field ${f.name} -> ${v.javaClass.name}")
+                            val wrapped = GuestAssetPacks.wrap(v)
+                            if (wrapped !== v) {
+                                f.set(null, wrapped)
+                                Log.i(TAG, "asset packs: static field ${f.name} replaced with proxy")
+                                done = true
+                            }
+                            break
+                        }
                     }
-                    if (cacheField != null) {
-                        cacheField.isAccessible = true
-                        val cache = cacheField.get(null) as? MutableMap<*, *>
-                        if (cache != null) {
-                            for ((key, value) in cache) {
-                                if (value == null) continue
-                                if (value.javaClass.name.contains("AssetPackManager") &&
-                                    value !is java.lang.reflect.Proxy) {
-                                    Log.i(TAG, "asset packs: found cached manager (key=$key, class=${value.javaClass.name})")
-                                    val wrapped = GuestAssetPacks.wrap(value)
-                                    if (wrapped !== value) {
-                                        cache[key] = wrapped
-                                        Log.i(TAG, "asset packs: cached manager replaced with proxy")
-                                        return@Thread
+
+                    // Strategy 2: static Map field holding cached instances.
+                    if (!done) {
+                        val mapField = mgrClass.declaredFields.firstOrNull { f ->
+                            java.lang.reflect.Modifier.isStatic(f.modifiers) &&
+                                java.util.Map::class.java.isAssignableFrom(f.type)
+                        }
+                        if (mapField != null) {
+                            mapField.isAccessible = true
+                            val cache = mapField.get(null) as? Map<*, *>
+                            if (cache != null) {
+                                for ((key, value) in cache) {
+                                    if (value == null) continue
+                                    if (value.javaClass.name.contains("AssetPackManager") &&
+                                        value !is java.lang.reflect.Proxy) {
+                                        Log.i(TAG, "asset packs: found in map field ${mapField.name} (key=$key)")
+                                        val wrapped = GuestAssetPacks.wrap(value)
+                                        if (wrapped !== value) {
+                                            @Suppress("UNCHECKED_CAST")
+                                            (mapField.get(null) as MutableMap<Any, Any>)[key] = wrapped
+                                            Log.i(TAG, "asset packs: map entry replaced with proxy")
+                                            done = true
+                                        }
+                                        break
                                     }
                                 }
                             }
                         }
                     }
-                    // If no cache field or no entry yet, log occasionally.
-                    if (attempts % 10 == 0) {
-                        Log.i(TAG, "asset packs: still waiting for cached manager (attempt $attempts)")
+
+                    // Strategy 3: scan the game's Application instance for fields holding a manager.
+                    if (!done && g.app != null) {
+                        var c: Class<*>? = g.app.javaClass
+                        while (c != null && c != Application::class.java) {
+                            for (f in c.declaredFields) {
+                                f.isAccessible = true
+                                val v = try { f.get(g.app) } catch (t: Throwable) { continue } ?: continue
+                                if (mgrClass.isInstance(v) && v !is java.lang.reflect.Proxy) {
+                                    Log.i(TAG, "asset packs: found manager in app field ${c.simpleName}.${f.name}")
+                                    val wrapped = GuestAssetPacks.wrap(v)
+                                    if (wrapped !== v) {
+                                        f.set(g.app, wrapped)
+                                        Log.i(TAG, "asset packs: app field replaced with proxy")
+                                        done = true
+                                        break
+                                    }
+                                }
+                            }
+                            if (done) break
+                            c = c.superclass
+                        }
+                    }
+
+                    if (!done && attempts % 10 == 0) {
+                        Log.i(TAG, "asset packs: still waiting for manager (attempt $attempts)")
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "asset packs: hook attempt $attempts failed: $t")
                 }
+                if (!done) Thread.sleep(400)
             }
-            Log.w(TAG, "asset packs: gave up waiting for cached manager after $attempts attempts")
+            if (!done) Log.w(TAG, "asset packs: gave up waiting after $attempts attempts")
         }.also { it.isDaemon = true; it.name = "las-pack-hook" }.start()
     }
 }
