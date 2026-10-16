@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.TextView
+import java.io.File
 
 // Reads this app's own log, keeps only the last game launch, drops noise,
 // and keeps the lines that matter when it has to shorten the text.
@@ -38,8 +39,12 @@ object GuestLog {
 
     private fun isImportant(l: String): Boolean = important.any { l.contains(it) }
 
-    fun read(): String {
-        val raw = try {
+    fun read(ctx: Context): String {
+        val saved = GuestLogFile.file(ctx)
+        val fromFile = try {
+            if (saved.exists() && saved.length() > 0) saved.readText() else null
+        } catch (e: Throwable) { null }
+        val raw = if (fromFile != null && fromFile.contains("GuestHost: launch step 1")) fromFile else try {
             val p = ProcessBuilder(
                 "logcat", "-d", "-b", "main", "-b", "system", "-b", "crash", "-t", "30000",
                 // only the tags that matter, so a long black screen does not push the launch out of range
@@ -79,7 +84,7 @@ object GuestLog {
     fun copy(activity: Activity, out: TextView) {
         out.text = "Reading game log..."
         Thread {
-            val text = read()
+            val text = read(activity)
             activity.runOnUiThread {
                 val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("game log", text))

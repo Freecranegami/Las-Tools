@@ -50,6 +50,7 @@ class HostApp : Application() {
         super.onCreate()
         instance = this
         if (inGuestProcess()) {
+            GuestLogFile.start(this)
             HiddenApi.exemptAll()
             if (Build.VERSION.SDK_INT >= 29) registerActivityLifecycleCallbacks(GuestSwap)
         }
@@ -76,4 +77,31 @@ private object GuestSwap : Application.ActivityLifecycleCallbacks {
     override fun onActivityStopped(activity: Activity) {}
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
     override fun onActivityDestroyed(activity: Activity) {}
+}
+
+// The phone's log buffer is small, so by the time the log is read after a long run the launch lines
+// are gone. The game process keeps its own copy of the lines that matter in a file.
+object GuestLogFile {
+    private const val MAX = 4_000_000L
+    fun file(ctx: android.content.Context) = File(ctx.filesDir, "guest-log.txt")
+
+    fun start(ctx: android.content.Context) {
+        Thread {
+            try {
+                val f = file(ctx)
+                if (f.exists() && f.length() > MAX) f.delete()
+                val p = ProcessBuilder("logcat", "-v", "threadtime", "-T", "1", "-b", "main", "-b", "system", "-b", "crash",
+                    "*:S", "GuestHost:V", "PlayCore:V", "playcore:V", "libc:V", "DEBUG:V", "AndroidRuntime:V",
+                    "nativeloader:D", "art:W", "ActivityThread:E").redirectErrorStream(true).start()
+                val out = java.io.FileOutputStream(f, true)
+                p.inputStream.bufferedReader().useLines { lines ->
+                    for (l in lines) {
+                        out.write((l + "\n").toByteArray()); out.flush()
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w("GuestHost", "log capture failed: $t")
+            }
+        }.also { it.isDaemon = true; it.name = "las-logfile" }.start()
+    }
 }
