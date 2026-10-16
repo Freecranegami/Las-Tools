@@ -70,8 +70,9 @@ object GuestLog {
             kept.add(if (l.length > cap) l.take(cap) else l)
         }
 
-        val header = if (start >= 0) "[log since the last game launch]"
-                     else "[no game launch found, showing the recent log]"
+        val source = if (raw === fromFile) "file" else if (fromFile == null) "phone log, no game log file" else "phone log, game log file has no launch"
+        val header = if (start >= 0) "[log since the last game launch, from the $source]"
+                     else "[no game launch found, showing the recent log, from the $source]"
         var text = header + "\n" + kept.joinToString("\n")
         if (text.length > 22000) {
             val trimmed = kept.filterIndexed { i, l -> isImportant(l) || i >= kept.size - 40 }

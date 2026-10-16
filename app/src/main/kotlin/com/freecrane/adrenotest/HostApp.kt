@@ -86,11 +86,14 @@ object GuestLogFile {
     fun file(ctx: android.content.Context) = File(ctx.filesDir, "guest-log.txt")
 
     fun start(ctx: android.content.Context) {
+        // Starting logcat takes a moment; the game's launch lines are written in that time. Ask for
+        // everything from this moment on, not from whenever logcat happens to be ready.
+        val since = java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
         Thread {
             try {
                 val f = file(ctx)
                 if (f.exists() && f.length() > MAX) f.delete()
-                val p = ProcessBuilder("logcat", "-v", "threadtime", "-T", "1", "-b", "main", "-b", "system", "-b", "crash",
+                val p = ProcessBuilder("logcat", "-v", "threadtime", "-T", since, "-b", "main", "-b", "system", "-b", "crash",
                     "*:S", "GuestHost:V", "PlayCore:V", "playcore:V", "libc:V", "DEBUG:V", "AndroidRuntime:V",
                     "nativeloader:D", "art:W", "ActivityThread:E").redirectErrorStream(true).start()
                 val out = java.io.FileOutputStream(f, true)
