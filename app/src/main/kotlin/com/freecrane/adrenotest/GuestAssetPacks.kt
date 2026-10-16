@@ -64,11 +64,11 @@ object GuestAssetPacks {
         // Map every local asset pack (by both canonical and raw split name) to the split files
         // that hold it, plus the total on-disk size. Matching on both lets the game find a pack
         // whether it asks for "data0" or "data0-master".
-        val packs = HashMap<String, List<File>>()
+        val packs = HashMap<String, MutableList<File>>()
         val sizes = HashMap<String, Long>()
         for (f in Util.guestSplits(root)) {
             for (key in linkedSetOf(canonicalName(f), rawName(f))) {
-                packs.computeIfAbsent(key) { ArrayList() }.add(f)
+                packs.getOrPut(key) { ArrayList() }.add(f)
                 sizes[key] = (sizes[key] ?: 0L) + f.length()
             }
         }
