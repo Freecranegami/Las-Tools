@@ -587,8 +587,19 @@ static jclass h_getobjcls(JNIEnv *e, jobject o) {
 static jclass g_wrap_cls = NULL;
 static jmethodID g_wrap_mid = NULL;
 
+static __thread int t_in_wrap = 0;
 static jobject after_obj(JNIEnv *e, const char *kind, jmethodID m, jobject r) {
     rec("%s %s -> %s", kind, mid_name(m), r ? "obj" : "NULL");
+    /* The game's native code gets its asset-pack manager from AssetPackManagerFactory.getInstance(Context).
+     * Hand it a manager that answers for packs that are really on the phone (see GuestAssetPacks). */
+    if (r && g_wrap_cls && g_wrap_mid && !t_in_wrap &&
+        !strncmp(mid_name(m), "getInstance(Landroid/content/Context;)Lcom/google/android/play/core/assetpacks/AssetPackManager;", 96)) {
+        t_in_wrap = 1;
+        jobject w = (*e)->CallStaticObjectMethod(e, g_wrap_cls, g_wrap_mid, r);
+        t_in_wrap = 0;
+        if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionClear(e); rec("   wrap threw"); }
+        else if (w) { rec("   AssetPackManager wrapped"); GLOG("asset packs: native getInstance -> wrapped manager"); return w; }
+    }
     if (!r && (*e)->ExceptionCheck(e)) {
         jthrowable t = (*e)->ExceptionOccurred(e);
         (*e)->ExceptionClear(e);
