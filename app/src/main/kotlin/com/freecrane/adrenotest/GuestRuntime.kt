@@ -225,7 +225,8 @@ object GuestRuntime {
                         }
                         if (mapField != null) {
                             mapField.isAccessible = true
-                            val cache = mapField.get(null) as? Map<*, *>
+                            @Suppress("UNCHECKED_CAST")
+                            val cache = mapField.get(null) as? MutableMap<Any?, Any?>
                             if (cache != null) {
                                 for ((key, value) in cache) {
                                     if (value == null) continue
@@ -234,9 +235,7 @@ object GuestRuntime {
                                         Log.i(TAG, "asset packs: found in map field ${mapField.name} (key=$key)")
                                         val wrapped = GuestAssetPacks.wrap(value)
                                         if (wrapped !== value) {
-                                            @Suppress("UNCHECKED_CAST")
-                                            val mm = mapField.get(null) as MutableMap<Any?, Any?>
-                                            mm[key] = wrapped
+                                            cache[key] = wrapped
                                             Log.i(TAG, "asset packs: map entry replaced with proxy")
                                             done = true
                                         }
@@ -257,7 +256,7 @@ object GuestRuntime {
                                 if (mgrClass.isInstance(v) && v !is java.lang.reflect.Proxy) {
                                     Log.i(TAG, "asset packs: found manager in app field ${c.simpleName}.${f.name}")
                                     val wrapped = GuestAssetPacks.wrap(v)
-                                    if (wrapped !== value as Any) {
+                                    if (wrapped !== v) {
                                         f.set(g.app, wrapped)
                                         Log.i(TAG, "asset packs: app field replaced with proxy")
                                         done = true
