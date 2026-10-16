@@ -235,7 +235,8 @@ object GuestRuntime {
                                         val wrapped = GuestAssetPacks.wrap(value)
                                         if (wrapped !== value) {
                                             @Suppress("UNCHECKED_CAST")
-                                            (mapField.get(null) as MutableMap<Any, Any>)[key] = wrapped
+                                            val mm = mapField.get(null) as MutableMap<Any?, Any?>
+                                            mm[key] = wrapped
                                             Log.i(TAG, "asset packs: map entry replaced with proxy")
                                             done = true
                                         }
@@ -256,7 +257,7 @@ object GuestRuntime {
                                 if (mgrClass.isInstance(v) && v !is java.lang.reflect.Proxy) {
                                     Log.i(TAG, "asset packs: found manager in app field ${c.simpleName}.${f.name}")
                                     val wrapped = GuestAssetPacks.wrap(v)
-                                    if (wrapped !== v) {
+                                    if (wrapped !== value as Any) {
                                         f.set(g.app, wrapped)
                                         Log.i(TAG, "asset packs: app field replaced with proxy")
                                         done = true
