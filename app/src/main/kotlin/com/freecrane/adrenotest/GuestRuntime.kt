@@ -59,6 +59,7 @@ object GuestRuntime {
             File(libDir, "lib$lib.so"),
             File(libDir, lib),
             File(libDir, "lib" + lib.removePrefix("lib").removeSuffix(".so") + ".so")
+        )
         return candidates.firstOrNull { it.exists() }?.path
     }
 
