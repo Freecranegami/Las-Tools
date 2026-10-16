@@ -1,16 +1,18 @@
 package com.freecrane.adrenotest
 
+import android.net.Uri
 import android.util.Log
+import java.io.File
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
+import java.util.zip.ZipFile
 
 // The game keeps its data in asset packs (data0, data1, game0 ...). Here they are splits that are
-// already on the phone, so the pack manager is asked about packs that are local. For a normal
-// install, Play Core answers from local state for those. This wraps the game's pack manager so
-// questions about packs that are present as splits are answered from what is on disk; every call
-// is logged so what the game asks for is visible.
+// already on the phone. This wraps the game's pack manager so it never talks to the Play Core
+// service (which is unavailable in the host). Local packs are answered from disk, and their
+// assets are unpacked into a real folder that getPackLocation points at.
 object GuestAssetPacks {
     private const val TAG = "GuestHost"
     private const val PKG = "com.google.android.play.core.assetpacks."
@@ -43,24 +45,43 @@ object GuestAssetPacks {
         }
     }
 
+    // A split APK's split name: the part after the split_ / split- prefix, without .apk.
+    // e.g. split_data0-master.apk -> data0-master (matches ApplicationInfo.splitNames).
+    private fun rawName(f: File): String =
+        f.name.removeSuffix(".apk").removePrefix("split_").removePrefix("split-")
+
+    // A split's canonical asset-pack name: the part before the first '-' qualifier.
+    // e.g. data0-master, data0-arm64_v8a -> data0 (the name the game asks for).
+    private fun canonicalName(f: File): String = rawName(f).substringBefore('-')
+
     private fun doWrap(real: Any): Any {
         val g = GuestRuntime.current ?: return real
         val ld = g.loader
         dump(ld)
         val mgr = Class.forName(PKG + "AssetPackManager", false, ld)
-        val local = GuestRuntime.splitNames.toSet()
-        Log.i(TAG, "asset packs: wrapping the manager, local packs=$local")
+        val root = g.apk.parentFile
+
+        // Map every local asset pack (by both canonical and raw split name) to the split files
+        // that hold it, plus the total on-disk size. Matching on both lets the game find a pack
+        // whether it asks for "data0" or "data0-master".
+        val packs = HashMap<String, List<File>>()
         val sizes = HashMap<String, Long>()
-        for (f in Util.guestSplits(java.io.File(g.apk.parentFile, "."))) {
-            sizes[f.name.removeSuffix(".apk").removePrefix("split_").removePrefix("split-")] = f.length()
+        for (f in Util.guestSplits(root)) {
+            for (key in linkedSetOf(canonicalName(f), rawName(f))) {
+                packs.computeIfAbsent(key) { ArrayList() }.add(f)
+                sizes[key] = (sizes[key] ?: 0L) + f.length()
+            }
         }
+        val local = packs.keys
+        Log.i(TAG, "asset packs: wrapping the manager, local packs=$local")
+
         return Proxy.newProxyInstance(ld, arrayOf(mgr)) { _, m, args ->
             val a: Array<Any?> = args ?: emptyArray()
             Log.i(TAG, "asset packs: call ${m.name}(" + a.joinToString(",") { describe(it) } + ")")
             try {
-                val mine = answer(ld, m, a, local, sizes)
+                val mine = answer(ld, m, a, local, sizes, packs, root)
                 if (mine != null) {
-                    Log.i(TAG, "asset packs: ${m.name} answered from the local splits")
+                    Log.i(TAG, "asset packs: ${m.name} answered from the local packs")
                     return@newProxyInstance mine
                 }
             } catch (t: Throwable) {
@@ -82,19 +103,20 @@ object GuestAssetPacks {
     }
 
     private fun answer(ld: ClassLoader, m: Method, a: Array<Any?>, local: Set<String>,
-                       sizes: Map<String, Long>): Any? {
+                      sizes: Map<String, Long>, packs: Map<String, List<File>>, root: File): Any? {
         when (m.name) {
             "getPackStates", "fetch" -> {
                 val names = (a.firstOrNull() as? Collection<*>)?.map { it.toString() } ?: return null
                 val mine = names.filter { it in local }
                 if (mine.isEmpty()) return null
+                for (n in mine) ensureExtracted(n, root, packs[n] ?: emptyList())
                 val states = statesFor(ld, mine, sizes) ?: return null
                 return task(ld, states)
             }
             "getPackLocation" -> {
                 val n = a.firstOrNull() as? String ?: return null
                 if (n !in local) return null
-                return locationFor(ld, n)
+                return locationFor(ld, n, packs[n] ?: emptyList(), root)
             }
         }
         return null
@@ -148,13 +170,91 @@ object GuestAssetPacks {
         return mk2.invoke(null, *args.toTypedArray())
     }
 
-    // Packs that are installed as splits are read through the asset manager, not from a folder.
-    private fun locationFor(ld: ClassLoader, name: String): Any? {
+    // Unpack the split APK(s) of an asset pack into a plain folder (guests/<pkg>/packs/<name>/),
+    // so the game can read its data with ordinary file paths. Done lazily once per pack; a marker
+    // file skips re-extraction until the game is re-imported (which wipes this folder).
+    private fun ensureExtracted(name: String, root: File, splits: List<File>): File? {
+        if (splits.isEmpty()) return null
+        val dir = File(root, "packs/" + name.substringBefore('-'))
+        val marker = File(dir, ".las_extracted")
+        if (marker.exists()) return dir
+        Log.i(TAG, "asset packs: extracting $name (${splits.size} split(s)) -> ${dir.path}")
+        var ok = true
+        for (f in splits) {
+            try {
+                ZipFile(f).use { z ->
+                    val en = z.entries()
+                    while (en.hasMoreElements()) {
+                        val e = en.nextElement()
+                        val n = e.name
+                        if (!n.startsWith("assets/") || e.isDirectory) continue
+                        val out = File(dir, n.removePrefix("assets/"))
+                        out.parentFile.mkdirs()
+                        z.getInputStream(e).use { i -> out.outputStream().use { o -> i.copyTo(o, 1 shl 16) } }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "asset packs: extract ${f.name} failed: $t")
+                ok = false
+            }
+        }
+        if (ok) {
+            marker.writeText(System.currentTimeMillis().toString())
+            Log.i(TAG, "asset packs: extracted $name to ${dir.path}")
+        } else {
+            Log.w(TAG, "asset packs: extraction of $name incomplete")
+        }
+        return if (ok) dir else null
+    }
+
+    // Build a real AssetPackLocation pointing at the unpacked pack folder. Reflection is used so
+    // the correct static factory is picked regardless of the Play Core version the game ships.
+    // Flags are filled in (isAssetFile, isUnpacked) order: false, true -> an unpacked directory.
+    private fun locationFor(ld: ClassLoader, name: String, splits: List<File>, root: File): Any? {
         val c = Class.forName(PKG + "AssetPackLocation", false, ld)
+        val folder = ensureExtracted(name, root, splits) ?: return null
         val cands = c.declaredMethods.filter {
             Modifier.isStatic(it.modifiers) && c.isAssignableFrom(it.returnType)
         }
         Log.i(TAG, "asset packs: location factories: " + cands.joinToString("; ") { sig(it) })
-        return null
+        val fileFactory = cands.firstOrNull { it.parameterTypes.getOrNull(0) == File::class.java }
+        val uriFactory = cands.firstOrNull { it.parameterTypes.getOrNull(0) == Uri::class.java }
+        return try {
+            when {
+                fileFactory != null -> {
+                    val flags = booleanArrayOf(false, true)
+                    var bi = 0
+                    val args = fileFactory.parameterTypes.map { t ->
+                        when (t) {
+                            File::class.java -> folder
+                            Boolean::class.javaPrimitiveType -> flags.getOrElse(bi++) { false }
+                            else -> null
+                        }
+                    }.toTypedArray()
+                    Log.i(TAG, "asset packs: location $name -> File(${folder.path}) flags=(false,true)")
+                    fileFactory.invoke(null, *args)
+                }
+                uriFactory != null -> {
+                    val flags = booleanArrayOf(false, true)
+                    var bi = 0
+                    val args = uriFactory.parameterTypes.map { t ->
+                        when (t) {
+                            Uri::class.java -> Uri.fromFile(folder)
+                            Boolean::class.javaPrimitiveType -> flags.getOrElse(bi++) { false }
+                            else -> null
+                        }
+                    }.toTypedArray()
+                    Log.i(TAG, "asset packs: location $name -> Uri(${folder.toURI()}) flags=(false,true)")
+                    uriFactory.invoke(null, *args)
+                }
+                else -> {
+                    Log.w(TAG, "asset packs: no location factory (File/Uri) found for $name")
+                    null
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "asset packs: build location for $name failed: $t")
+            null
+        }
     }
 }
