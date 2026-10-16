@@ -22,6 +22,7 @@ object GuestLog {
         "system_exposed_libraries", "SurfaceSyncer", "SurfaceView", "InsetsController",
         "RenderInspector", "MIUINDBG", "Perf    :", "GameSDKManager",
         "framework-connectivity", "PackageParser",
+        "asset in ", "reflect impl methods", "NativeGameActivity methods", "AudioTrack]",
         // big crash-report blocks we don't need
         "runtime.cc:761", "verification.cc", "MemMap", "NOTE:", "CRASH   :     x", "DEBUG   :     x",
         "CRASH   :     lr", "DEBUG   :     lr", "Tombstone written"
@@ -64,12 +65,12 @@ object GuestLog {
         val header = if (start >= 0) "[log since the last game launch]"
                      else "[no game launch found, showing the recent log]"
         var text = header + "\n" + kept.joinToString("\n")
-        if (text.length > 14000) {
+        if (text.length > 22000) {
             val trimmed = kept.filterIndexed { i, l -> isImportant(l) || i >= kept.size - 40 }
             text = "$header [trimmed]\n" + trimmed.joinToString("\n")
         }
-        return if (text.length <= 14000) text
-               else text.take(3000) + "\n...[cut]...\n" + text.takeLast(11000)
+        return if (text.length <= 22000) text
+               else text.take(3000) + "\n...[cut]...\n" + text.takeLast(18000)
     }
 
     fun copy(activity: Activity, out: TextView) {

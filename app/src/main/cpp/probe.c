@@ -669,8 +669,8 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
     patch_slot((void **)&(*env)->GetStaticMethodID, (void *)h_getsmid, (void **)&o_getsmid);
     patch_slot((void **)&(*env)->GetFieldID, (void *)h_getfid, (void **)&o_getfid);
     patch_slot((void **)&(*env)->GetStaticFieldID, (void *)h_getsfid, (void **)&o_getsfid);
-    /* Build 37 showed these hooks make no difference (black screen with them fixed), so they are off. */
-#if 0
+    /* Build 41: back on (after_obj now returns its result), so the ring shows which Java methods the game
+     * calls from its asset-pack polling loop. The snapshot dumps the ring. */
     patch_slot((void **)&(*env)->GetStaticObjectField, (void *)h_getsobj, (void **)&o_getsobj);
     patch_slot((void **)&(*env)->GetObjectField, (void *)h_getobj, (void **)&o_getobj);
     patch_slot((void **)&(*env)->GetObjectClass, (void *)h_getobjcls, (void **)&o_getobjcls);
@@ -681,7 +681,6 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
       patch_slot((void **)&(*env)->CallObjectMethod, (void *)h_com, &dummy);
       patch_slot((void **)&(*env)->CallStaticObjectMethodA, (void *)h_csoa, (void **)&o_csoa);
       patch_slot((void **)&(*env)->CallObjectMethodA, (void *)h_coa, (void **)&o_coa); }
-#endif
     return (*env)->NewStringUTF(env, "FindClass hook installed");
 }
 
@@ -791,5 +790,6 @@ Java_com_freecrane_adrenotest_Native_snapshot(JNIEnv *env, jobject thiz, jstring
     if (d) closedir(d);
     GLOG("snap[%s]: %d idle helper threads left out", tag, idle);
     GLOG("snap[%s]: end, %d threads", tag, count);
+    if (!strcmp(tag, "25s")) ring_dump();
     (*env)->ReleaseStringUTFChars(env, jtag, tag);
 }
