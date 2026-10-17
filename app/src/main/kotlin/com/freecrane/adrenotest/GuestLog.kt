@@ -71,6 +71,22 @@ object GuestLog {
         }
 
         val source = if (raw === fromFile) "file" else if (fromFile == null) "phone log, no game log file" else "phone log, game log file has no launch"
+        // lines that repeat (polling) are shown once with a count
+        val prefix = Regex("^\\S+\\s+\\S+\\s+\\d+\\s+\\d+\\s+[A-Z]\\s+")
+        val seen = LinkedHashMap<String, Int>()
+        val firstLine = HashMap<String, String>()
+        val uniq = ArrayList<String>()
+        for (l in kept) {
+            val key = prefix.replaceFirst(l, "")
+            val n = seen[key]
+            if (n == null) { seen[key] = 1; firstLine[key] = l; uniq.add(key) } else seen[key] = n + 1
+        }
+        kept.clear()
+        for (key in uniq) {
+            val c = seen[key] ?: 1
+            kept.add(if (c > 1) firstLine[key] + "   [x$c]" else firstLine[key]!!)
+        }
+
         val header = if (start >= 0) "[log since the last game launch, from the $source]"
                      else "[no game launch found, showing the recent log, from the $source]"
         var text = header + "\n" + kept.joinToString("\n")

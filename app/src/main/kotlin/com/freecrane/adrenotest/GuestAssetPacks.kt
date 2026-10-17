@@ -177,12 +177,7 @@ object GuestAssetPacks {
             }
             map[n] = mk.invoke(null, *args.toTypedArray())
         }
-        val mk2 = statesCls.declaredMethods.firstOrNull {
-            Modifier.isStatic(it.modifiers) && statesCls.isAssignableFrom(it.returnType) &&
-                it.parameterTypes.any { p -> Map::class.java.isAssignableFrom(p) }
-        } ?: return null
-        mk2.isAccessible = true
-        val args = mk2.parameterTypes.map { t ->
+        fun fill(types: Array<Class<*>>): Array<Any?> = types.map { t ->
             when {
                 Map::class.java.isAssignableFrom(t) -> map
                 t == Long::class.javaPrimitiveType -> total
@@ -192,8 +187,51 @@ object GuestAssetPacks {
                 t == Boolean::class.javaPrimitiveType -> false
                 else -> null
             }
+        }.toTypedArray()
+
+        // 1. a static factory that takes the map
+        val mk2 = statesCls.declaredMethods.firstOrNull {
+            Modifier.isStatic(it.modifiers) && statesCls.isAssignableFrom(it.returnType) &&
+                it.parameterTypes.any { p -> Map::class.java.isAssignableFrom(p) }
         }
-        return mk2.invoke(null, *args.toTypedArray())
+        if (mk2 != null) {
+            mk2.isAccessible = true
+            return mk2.invoke(null, *fill(mk2.parameterTypes))
+        }
+        // 2. a concrete subclass of AssetPackStates in the game's own Play Core, built through its constructor
+        val impl = findStatesImpl(ld, statesCls)
+        val ctor = impl?.declaredConstructors?.firstOrNull { c -> c.parameterTypes.any { Map::class.java.isAssignableFrom(it) } }
+        if (ctor != null) {
+            ctor.isAccessible = true
+            return ctor.newInstance(*fill(ctor.parameterTypes))
+        }
+        // 3. nothing fits: say what is there, so the next attempt can use the real names
+        Log.w(TAG, "asset packs: no way to build AssetPackStates. methods: " +
+            statesCls.declaredMethods.joinToString("; ") { sig(it) })
+        Log.w(TAG, "asset packs: AssetPackStates constructors: " +
+            statesCls.declaredConstructors.joinToString("; ") { c -> c.parameterTypes.joinToString(",") { it.simpleName } } +
+            "; subclass=" + (impl?.name ?: "none found"))
+        return null
+    }
+
+    private fun findStatesImpl(ld: ClassLoader, statesCls: Class<*>): Class<*>? {
+        val root = GuestRuntime.current?.apk?.parentFile ?: return null
+        for (path in Util.guestDexPath(root).split(':')) {
+            try {
+                @Suppress("DEPRECATION")
+                val df = dalvik.system.DexFile(path)
+                val en = df.entries()
+                while (en.hasMoreElements()) {
+                    val n = en.nextElement()
+                    if (!n.startsWith(PKG)) continue
+                    val c = try { Class.forName(n, false, ld) } catch (t: Throwable) { continue }
+                    if (c != statesCls && statesCls.isAssignableFrom(c) && !Modifier.isAbstract(c.modifiers)) return c
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "asset packs: scanning $path failed: $t")
+            }
+        }
+        return null
     }
 
     // Unpack the split APK(s) of an asset pack into a plain folder (guests/<pkg>/packs/<name>/),
