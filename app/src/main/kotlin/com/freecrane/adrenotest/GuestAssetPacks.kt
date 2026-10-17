@@ -312,8 +312,27 @@ object GuestAssetPacks {
                     uriFactory.invoke(null, *args)
                 }
                 else -> {
-                    Log.w(TAG, "asset packs: no location factory (File/Uri) found for $name")
-                    null
+                    // the concrete subclass in the game's own Play Core: (int storageMethod, String path, String assetsPath)
+                    val impl = findStatesImpl(ld, c)
+                    val ctor = impl?.declaredConstructors?.firstOrNull { k -> k.parameterTypes.any { it == String::class.java } }
+                    if (ctor == null) {
+                        Log.w(TAG, "asset packs: no way to build AssetPackLocation for $name; subclass=" + (impl?.name ?: "none") +
+                            " ctors=" + (impl?.declaredConstructors?.joinToString("; ") { k -> k.parameterTypes.joinToString(",") { it.simpleName } } ?: "-"))
+                        null
+                    } else {
+                        ctor.isAccessible = true
+                        val args = ctor.parameterTypes.map { t ->
+                            when (t) {
+                                String::class.java -> folder.path
+                                Int::class.javaPrimitiveType -> 0
+                                Boolean::class.javaPrimitiveType -> false
+                                Long::class.javaPrimitiveType -> 0L
+                                else -> null
+                            }
+                        }.toTypedArray()
+                        Log.i(TAG, "asset packs: location $name -> ${impl.name}(${folder.path}) storage=0")
+                        ctor.newInstance(*args)
+                    }
                 }
             }
         } catch (t: Throwable) {
