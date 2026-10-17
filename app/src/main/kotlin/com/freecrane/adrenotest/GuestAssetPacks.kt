@@ -214,8 +214,39 @@ object GuestAssetPacks {
         return null
     }
 
+    private val implCache = HashMap<Class<*>, Class<*>?>()
+    @Volatile private var rootDir: File? = null
+    private val locCache = HashMap<String, Any>()
+
+    // The scan walks the whole game dex (about half a second), so do it once per class.
     private fun findStatesImpl(ld: ClassLoader, statesCls: Class<*>): Class<*>? {
-        val root = GuestRuntime.current?.apk?.parentFile ?: return null
+        synchronized(implCache) {
+            if (implCache.containsKey(statesCls)) return implCache[statesCls]
+            val r = scanImpl(ld, statesCls)
+            implCache[statesCls] = r
+            return r
+        }
+    }
+
+    // Build every answer before the game starts, so the game's main thread never waits on us.
+    @JvmStatic
+    fun prewarm(ld: ClassLoader, root: File) {
+        try {
+            rootDir = root
+            val t0 = System.currentTimeMillis()
+            val packs = LinkedHashMap<String, MutableList<File>>()
+            for (f in Util.guestSplits(root)) packs.getOrPut(canonicalName(f)) { ArrayList() }.add(f)
+            for ((n, fs) in packs) locationFor(ld, n, fs, root)
+            val st = Class.forName(PKG + "AssetPackStates", false, ld)
+            findStatesImpl(ld, st)
+            Log.i(TAG, "asset packs: answers prepared in ${System.currentTimeMillis() - t0} ms")
+        } catch (t: Throwable) {
+            Log.w(TAG, "asset packs: prewarm failed: $t")
+        }
+    }
+
+    private fun scanImpl(ld: ClassLoader, statesCls: Class<*>): Class<*>? {
+        val root = rootDir ?: GuestRuntime.current?.apk?.parentFile ?: return null
         for (path in Util.guestDexPath(root).split(':')) {
             try {
                 @Suppress("DEPRECATION")
@@ -286,6 +317,13 @@ object GuestAssetPacks {
     // the correct static factory is picked regardless of the Play Core version the game ships.
     // Flags are filled in (isAssetFile, isUnpacked) order: false, true -> an unpacked directory.
     private fun locationFor(ld: ClassLoader, name: String, splits: List<File>, root: File): Any? {
+        synchronized(locCache) { locCache[name]?.let { return it } }
+        val r = buildLocation(ld, name, splits, root)
+        if (r != null) synchronized(locCache) { locCache[name] = r }
+        return r
+    }
+
+    private fun buildLocation(ld: ClassLoader, name: String, splits: List<File>, root: File): Any? {
         val c = Class.forName(PKG + "AssetPackLocation", false, ld)
         val folder = ensureExtracted(name, root, splits) ?: return null
         val cands = c.declaredMethods.filter {
