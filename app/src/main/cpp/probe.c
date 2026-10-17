@@ -1110,6 +1110,33 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     struct sigaction *old = (sig == SIGSEGV) ? &g_old_segv : &g_old_bus;
     uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc;
     uintptr_t base = g_rdr_base;
+
+    /* Build 57: pgReadData::Worker calls device->Read(handle, offset, buf, size) for a queued request
+     * whose device pointer is NULL (a read of vgd_android.rpf). The handle holds the file's own
+     * descriptor at +0x18, so do the read the device would have done (pread) and resume the worker
+     * after the call, with the byte count as the result. Only this exact fault is handled. */
+    #define RDR_WORKER_FAULT  0x1a3ed84UL
+    #define RDR_WORKER_RESUME 0x1a3ed98UL
+    if (sig == SIGSEGV && base && pc == base + RDR_WORKER_FAULT && uc->uc_mcontext.regs[0] == 0 && si->si_addr == NULL) {
+        uint64_t req = uc->uc_mcontext.regs[19], handle = uc->uc_mcontext.regs[1], off = uc->uc_mcontext.regs[2];
+        int fd = -1; uint64_t dst = 0; uint32_t sz = 0;
+        if (safe_read(&fd, (const void *)(handle + 0x18), 4) && safe_read(&dst, (const void *)(req + 0x18), 8) &&
+            safe_read(&sz, (const void *)(req + 0x20), 4) && fd >= 0 && fd < 4096 && dst && sz <= (64u << 20)) {
+            ssize_t n = pread(fd, (void *)dst, sz, (off_t)off);
+            static volatile int cnt = 0;
+            int c = ++cnt;
+            if (c <= 20 || c % 200 == 0) {
+                const char *nm = "?";
+                unsigned tot = g_oring_n, m = tot < OPEN_RING ? tot : OPEN_RING;
+                for (unsigned k = 0; k < m; k++) if (g_oring[k].rv == fd && !strcmp(g_oring[k].fn, "open")) nm = g_oring[k].name;
+                GLOG("read-fix #%d: device was NULL, did pread(fd=%d [%.150s], off=0x%llx, size=%u) -> %ld", c, fd, nm,
+                     (unsigned long long)off, sz, (long)n);
+            }
+            uc->uc_mcontext.regs[0] = (uint64_t)(int64_t)n;
+            uc->uc_mcontext.pc = base + RDR_WORKER_RESUME;
+            return;
+        }
+    }
     if (base && pc >= base && pc < base + 0x6000000 && !g_crash_done) {
         g_crash_done = 1;
         GLOG("crash-info sig=%d code=%d addr=%p tid=%d pc=librdr+0x%lx lr=librdr+0x%lx sp=%p base=%p",
