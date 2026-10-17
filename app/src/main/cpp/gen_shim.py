@@ -121,6 +121,10 @@ static void vkshim_spoof_props(unsigned char *p) {
     strncpy((char *)p + 20, nm, 255); p[20 + 255] = 0;
     *(unsigned *)(p + 8) = (unsigned)vkshim_hex(getenv("LAS_GPU_VENDOR"), *(unsigned *)(p + 8));
     *(unsigned *)(p + 12) = (unsigned)vkshim_hex(getenv("LAS_GPU_DEVICE"), *(unsigned *)(p + 12));
+    static volatile int logged2;
+    if (!logged2 && !__sync_lock_test_and_set(&logged2, 1))
+        __android_log_print(ANDROID_LOG_INFO, "GuestHost", "vkshim: GPU told to the game: name=\"%.100s\" vendor=0x%x device=0x%x",
+            (const char *)(p + 20), *(unsigned *)(p + 8), *(unsigned *)(p + 12));
 }
 /* walk a pNext chain: log (and optionally spoof) the driver identity (DRIVER_PROPERTIES, or VULKAN_1_2_PROPERTIES) */
 static void vkshim_spoof_chain(unsigned char *p2) {

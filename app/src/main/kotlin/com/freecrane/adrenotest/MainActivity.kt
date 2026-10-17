@@ -373,6 +373,19 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun chooseCpu(out: TextView) {
+        val labels = GpuSpoof.cpus.map { it.label }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("CPU the game sees")
+            .setSingleChoiceItems(labels, GpuSpoof.cpuIndex(this)) { d, which ->
+                GpuSpoof.setCpu(this, which)
+                out.text = "CPU spoof: ${GpuSpoof.cpus[which].label}\nApplies the next time the game starts."
+                d.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     // ---------- UI ----------
 
     private fun btn(label: String, onClick: () -> Unit): Button =
@@ -421,7 +434,8 @@ class MainActivity : Activity() {
                 btn("Show log") { showLog() },
                 btn("Copy log") { copyLog() },
                 btn("Guest log") { GuestLog.copy(this@MainActivity, out) },
-                btn("GPU spoof") { chooseGpu(out) }))
+                btn("GPU spoof") { chooseGpu(out) },
+                btn("CPU spoof") { chooseCpu(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))

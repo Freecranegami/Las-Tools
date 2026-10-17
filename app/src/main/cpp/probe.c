@@ -996,9 +996,26 @@ static int fh_mkdirs(const char *path) {          /* create every directory abov
     for (size_t i = 1; i < n; i++) if (tmp[i] == '/') { tmp[i] = 0; mkdir(tmp, 0771); tmp[i] = '/'; }
     return 0;
 }
+static char g_fake[400];                          /* LAS_FAKE_DIR: generated cpuinfo / gpu_model, when spoofing */
+static volatile int g_hw_logged = 0;
 static const char *fh_redirect(const char *p, char *buf, size_t n, int create) {
     static const char *roots[] = { "/sdcard", "/storage/emulated/0", "/storage/self/primary", "/mnt/sdcard", "/data/media/0", NULL };
-    if (!p || !g_ext[0] || p[0] != '/') return p;
+    if (!p || p[0] != '/') return p;
+    if (p[1] == 'p' || p[1] == 's') {            /* device identity files: log who reads them, serve the spoofed copies */
+        int cpu = !strcmp(p, "/proc/cpuinfo");
+        int gpu = !strncmp(p, "/sys/class/kgsl/", 16) && strstr(p, "gpu_model");
+        if (cpu || gpu || !strncmp(p, "/sys/devices/soc", 16) || !strncmp(p, "/sys/class/kgsl/", 16) || !strncmp(p, "/sys/devices/system/cpu/", 24)) {
+            if (g_hw_logged < 80 && fh_first(p)) { g_hw_logged++; GLOG("native-hw open(%.200s)%s", p, (cpu || gpu) && g_fake[0] ? " [spoofed]" : ""); }
+            if (g_fake[0]) {
+                const char *f = cpu ? "cpuinfo" : gpu ? "gpu_model" : NULL;
+                if (f) {
+                    snprintf(buf, n, "%s/%s", g_fake, f);
+                    if (access(buf, R_OK) == 0) return buf;
+                }
+            }
+        }
+    }
+    if (!g_ext[0]) return p;
     for (int i = 0; roots[i]; i++) {
         size_t l = strlen(roots[i]);
         if (strncmp(p, roots[i], l)) continue;
@@ -1050,7 +1067,54 @@ static int h_rmdir(const char *p) { RD(p, 0); return rmdir(p); }
 static int h_remove(const char *p) { RD(p, 0); return remove(p); }
 static int h_rename(const char *a, const char *b) { char ra[1024], rb2[1024]; a = fh_redirect(a, ra, sizeof ra, 0); b = fh_redirect(b, rb2, sizeof rb2, 1); return rename(a, b); }
 
+
+/* ---------- Build 60: device identity the game reads besides Vulkan ----------
+ * System properties (SoC / board), OpenGL ES strings, eglGetProcAddress. Values come from LAS_* env set by the app.
+ */
+#include <dlfcn.h>
+extern int __system_property_get(const char *name, char *value);
+static int h_spg(const char *name, char *value) {
+    int r = __system_property_get(name, value);
+    if (!name) return r;
+    static const struct { const char *prop, *env; } map[] = {
+        {"ro.hardware", "LAS_HARDWARE"}, {"ro.hardware.chipname", "LAS_SOC_MODEL"}, {"ro.board.platform", "LAS_BOARD"},
+        {"ro.product.board", "LAS_BOARD"}, {"ro.soc.model", "LAS_SOC_MODEL"}, {"ro.soc.manufacturer", "LAS_SOC_MFR"},
+        {"ro.vendor.qti.soc_model", "LAS_SOC_MODEL"}, {NULL, NULL}
+    };
+    const char *sp = NULL;
+    for (int i = 0; map[i].prop; i++)
+        if (!strcmp(name, map[i].prop)) { const char *v = getenv(map[i].env); if (v && *v) sp = v; break; }
+    static volatile int logged = 0;
+    if (logged < 60 && fh_first(name) && (sp || !strncmp(name, "ro.hardware", 11) || !strncmp(name, "ro.board", 8) || !strncmp(name, "ro.soc", 6) || !strncmp(name, "ro.product", 10) || strstr(name, "chip") || strstr(name, "gpu") || strstr(name, "soc"))) {
+        logged++;
+        GLOG("native-prop %s = \"%.60s\"%s%.60s", name, r > 0 ? value : "", sp ? " -> " : "", sp ? sp : "");
+    }
+    if (sp) { strncpy(value, sp, 91); value[91] = 0; return (int)strlen(value); }
+    return r;
+}
+typedef const unsigned char *(*glgs_t)(unsigned);
+static const unsigned char *h_glGetString(unsigned name) {
+    static glgs_t real;
+    if (!real) real = (glgs_t)dlsym(RTLD_DEFAULT, "glGetString");
+    const unsigned char *r = real ? real(name) : NULL;
+    const char *sp = name == 0x1F01 ? getenv("LAS_GL_RENDERER") : name == 0x1F00 ? getenv("LAS_GL_VENDOR") : NULL;
+    static volatile int logged = 0;
+    if (name >= 0x1F00 && name <= 0x1F02 && logged < 12 && fh_first(name == 0x1F01 ? "gl-r" : name == 0x1F00 ? "gl-v" : "gl-ver")) {
+        logged++;
+        GLOG("native-gl glGetString(0x%x) = \"%.80s\"%s%.80s", name, r ? (const char *)r : "(null)", sp && *sp ? " -> " : "", sp && *sp ? sp : "");
+    }
+    return (sp && *sp) ? (const unsigned char *)sp : r;
+}
+typedef void *(*egpa_t)(const char *);
+static void *h_eglGetProcAddress(const char *n) {
+    static egpa_t real;
+    if (!real) real = (egpa_t)dlsym(RTLD_DEFAULT, "eglGetProcAddress");
+    if (n && !strcmp(n, "glGetString")) return (void *)h_glGetString;
+    return real ? real(n) : NULL;
+}
+
 static const struct { const char *name; void *fn; } fh_tab[] = {
+    {"__system_property_get", h_spg}, {"glGetString", h_glGetString}, {"eglGetProcAddress", h_eglGetProcAddress},
     {"mkdir", h_mkdir}, {"unlink", h_unlink}, {"rmdir", h_rmdir}, {"remove", h_remove}, {"rename", h_rename},
     {"AAssetManager_open", h_aam_open},
     {"open", h_open}, {"__open_2", h_open2}, {"openat", h_openat}, {"__openat_2", h_openat2},
@@ -1061,9 +1125,11 @@ static const struct { const char *name; void *fn; } fh_tab[] = {
 static uintptr_t g_rdr_base;
 static int fh_patch_cb(struct dl_phdr_info *info, size_t sz, void *data) {
     (void)sz;
-    if (!info->dlpi_name || !strstr(info->dlpi_name, "librdr.so")) return 0;
+    if (!info->dlpi_name) return 0;
+    int is_rdr = strstr(info->dlpi_name, "librdr.so") != NULL;
+    if (!is_rdr && (!strstr(info->dlpi_name, "/guests/") || strstr(info->dlpi_name, "vkshim"))) return 0;
     uintptr_t base = info->dlpi_addr;
-    g_rdr_base = base;
+    if (is_rdr) g_rdr_base = base;
     const ElfW(Dyn) *dyn = NULL;
     for (int i = 0; i < info->dlpi_phnum; i++)
         if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) dyn = (const ElfW(Dyn) *)(base + info->dlpi_phdr[i].p_vaddr);
@@ -1093,24 +1159,25 @@ static int fh_patch_cb(struct dl_phdr_info *info, size_t sz, void *data) {
                 if (strcmp(nm, fh_tab[k].name)) continue;
                 void **slot = (void **)(base + r[i].r_offset);
                 uintptr_t pg = (uintptr_t)slot & ~(uintptr_t)4095;
+                if (*slot == fh_tab[k].fn) continue;
                 if (mprotect((void *)pg, 4096, PROT_READ | PROT_WRITE) == 0) { *slot = fh_tab[k].fn; (*count)++; }
             }
         }
     }
-    return 1;
+    return 0;
 }
 
 static void *fh_thread(void *arg) {
     (void)arg;
-    for (int i = 0; i < 3000; i++) {            /* up to ~60 s, until the game library is loaded */
+    int found = 0;
+    for (int i = 0; i < 6000; i++) {            /* ~2 min: the game's libraries load at different times */
         int count = 0;
-        if (dl_iterate_phdr(fh_patch_cb, &count) == 1) {
-            GLOG("file hooks: patched %d imports in librdr.so", count);
-            return NULL;
-        }
-        usleep(20000);
+        dl_iterate_phdr(fh_patch_cb, &count);
+        if (count) GLOG("file hooks: patched %d imports in the game's libraries", count);
+        if (g_rdr_base) found = 1;
+        usleep(found && i > 1500 ? 100000 : 20000);
     }
-    GLOG("file hooks: librdr.so never appeared");
+    if (!found) GLOG("file hooks: librdr.so never appeared");
     return NULL;
 }
 
@@ -1122,7 +1189,8 @@ Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz,
     if (pk) { strncpy(g_pkg, pk, sizeof g_pkg - 1); (*env)->ReleaseStringUTFChars(env, jpkg, pk); }
     if (ex) { strncpy(g_ext, ex, sizeof g_ext - 1); (*env)->ReleaseStringUTFChars(env, jext, ex); }
     if (g_ext[0]) { char t[500]; snprintf(t, sizeof t, "%s/data/x", g_ext); fh_mkdirs(t); snprintf(t, sizeof t, "%s/obb/x", g_ext); fh_mkdirs(t); }
-    GLOG("file hooks: Android/data and Android/obb of %s -> %s", g_pkg, g_ext);
+    { const char *fk = getenv("LAS_FAKE_DIR"); if (fk) strncpy(g_fake, fk, sizeof g_fake - 1); }
+    GLOG("file hooks: Android/data and Android/obb of %s -> %s; fake dir %s", g_pkg, g_ext, g_fake);
     pthread_t t;
     if (pthread_create(&t, NULL, fh_thread, NULL) == 0) pthread_detach(t);
 }
