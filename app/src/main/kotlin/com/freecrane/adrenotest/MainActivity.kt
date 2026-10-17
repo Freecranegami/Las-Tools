@@ -44,6 +44,7 @@ object Native {
     external fun threadProbe(names: String)
     external fun installFindClassHook(loader: ClassLoader): String
     external fun snapshot(tag: String)
+    external fun installFileHooks()
 
     external fun openCustom(
         tmpDir: String, hookDir: String,

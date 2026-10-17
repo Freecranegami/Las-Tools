@@ -900,3 +900,142 @@ Java_com_freecrane_adrenotest_Native_snapshot(JNIEnv *env, jobject thiz, jstring
     if (!strcmp(tag, "25s")) ring_dump();
     (*env)->ReleaseStringUTFChars(env, jtag, tag);
 }
+
+/* ---------- Build 54: log the file calls that fail inside the game's own library ----------
+ * The game's data-read thread crashes on a null pointer, which usually means a file or device it
+ * asked for could not be resolved. Linux does not log failed opens, so patch the game library's
+ * import table (GOT) for the common file calls and log the failures (and the pack files it does open).
+ */
+#include <link.h>
+#include <elf.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <android/log.h>
+
+#ifndef R_AARCH64_JUMP_SLOT
+#define R_AARCH64_JUMP_SLOT 1026
+#endif
+#ifndef R_AARCH64_GLOB_DAT
+#define R_AARCH64_GLOB_DAT 1025
+#endif
+#define FH_SEEN 2048
+static volatile uint32_t g_seen[FH_SEEN];
+static volatile int g_fail_logged = 0, g_ok_logged = 0;
+
+static uint32_t fh_hash(const char *s) { uint32_t h = 2166136261u; while (*s) h = (h ^ (uint8_t)*s++) * 16777619u; return h ? h : 1; }
+static int fh_first(const char *s) {              /* true the first time this string is seen */
+    uint32_t h = fh_hash(s), i = h % FH_SEEN;
+    for (int n = 0; n < FH_SEEN; n++, i = (i + 1) % FH_SEEN) {
+        if (g_seen[i] == h) return 0;
+        if (g_seen[i] == 0) { g_seen[i] = h; return 1; }
+    }
+    return 0;
+}
+static int fh_boring(const char *p) {
+    static const char *skip[] = { "/proc/", "/sys/", "/dev/", "/system/", "/vendor/", "/apex/", "/product/", "/odm/", NULL };
+    for (int i = 0; skip[i]; i++) if (!strncmp(p, skip[i], strlen(skip[i]))) return 1;
+    return 0;
+}
+static void fh_note(const char *fn, const char *p, int r, int e) {
+    if (!p) return;
+    if (r < 0) {
+        if (e == EEXIST || e == EINTR || e == EAGAIN || fh_boring(p)) return;
+        if (g_fail_logged >= 400 || !fh_first(p)) return;
+        g_fail_logged++;
+        GLOG("native-fail %s(%.230s) errno=%d", fn, p, e);
+    } else if (strstr(p, "/packs/") || strstr(p, "/guests/")) {
+        if (g_ok_logged >= 120 || !fh_first(p)) return;
+        g_ok_logged++;
+        GLOG("native-open %s(%.230s)", fn, p);
+    }
+}
+
+static int h_open(const char *p, int fl, ...) {
+    va_list ap; va_start(ap, fl); mode_t m = (fl & O_CREAT) ? (mode_t)va_arg(ap, int) : 0; va_end(ap);
+    int r = open(p, fl, m); int e = errno; fh_note("open", p, r, e); errno = e; return r;
+}
+static int h_open2(const char *p, int fl) { int r = open(p, fl, 0); int e = errno; fh_note("open", p, r, e); errno = e; return r; }
+static int h_openat(int d, const char *p, int fl, ...) {
+    va_list ap; va_start(ap, fl); mode_t m = (fl & O_CREAT) ? (mode_t)va_arg(ap, int) : 0; va_end(ap);
+    int r = openat(d, p, fl, m); int e = errno; if (p && p[0] == '/') fh_note("openat", p, r, e); errno = e; return r;
+}
+static int h_openat2(int d, const char *p, int fl) { int r = openat(d, p, fl, 0); int e = errno; if (p && p[0] == '/') fh_note("openat", p, r, e); errno = e; return r; }
+static int h_stat(const char *p, struct stat *s) { int r = stat(p, s); int e = errno; fh_note("stat", p, r, e); errno = e; return r; }
+static int h_lstat(const char *p, struct stat *s) { int r = lstat(p, s); int e = errno; fh_note("lstat", p, r, e); errno = e; return r; }
+static int h_fstatat(int d, const char *p, struct stat *s, int f) { int r = fstatat(d, p, s, f); int e = errno; if (p && p[0] == '/') fh_note("fstatat", p, r, e); errno = e; return r; }
+static int h_access(const char *p, int m) { int r = access(p, m); int e = errno; fh_note("access", p, r, e); errno = e; return r; }
+static FILE *h_fopen(const char *p, const char *m) { FILE *r = fopen(p, m); int e = errno; fh_note("fopen", p, r ? 0 : -1, e); errno = e; return r; }
+static DIR *h_opendir(const char *p) { DIR *r = opendir(p); int e = errno; fh_note("opendir", p, r ? 0 : -1, e); errno = e; return r; }
+
+static const struct { const char *name; void *fn; } fh_tab[] = {
+    {"open", h_open}, {"__open_2", h_open2}, {"openat", h_openat}, {"__openat_2", h_openat2},
+    {"stat", h_stat}, {"lstat", h_lstat}, {"fstatat", h_fstatat}, {"access", h_access},
+    {"fopen", h_fopen}, {"opendir", h_opendir}, {NULL, NULL}
+};
+
+static int fh_patch_cb(struct dl_phdr_info *info, size_t sz, void *data) {
+    (void)sz;
+    if (!info->dlpi_name || !strstr(info->dlpi_name, "librdr.so")) return 0;
+    uintptr_t base = info->dlpi_addr;
+    const ElfW(Dyn) *dyn = NULL;
+    for (int i = 0; i < info->dlpi_phnum; i++)
+        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) dyn = (const ElfW(Dyn) *)(base + info->dlpi_phdr[i].p_vaddr);
+    if (!dyn) return 0;
+    uintptr_t symtab = 0, strtab = 0, jmprel = 0, rela = 0; size_t pltsz = 0, relasz = 0;
+#define FIX(v) ((v) >= base ? (uintptr_t)(v) : base + (uintptr_t)(v))
+    for (; dyn->d_tag != DT_NULL; dyn++) {
+        switch (dyn->d_tag) {
+            case DT_SYMTAB: symtab = FIX(dyn->d_un.d_ptr); break;
+            case DT_STRTAB: strtab = FIX(dyn->d_un.d_ptr); break;
+            case DT_JMPREL: jmprel = FIX(dyn->d_un.d_ptr); break;
+            case DT_PLTRELSZ: pltsz = dyn->d_un.d_val; break;
+            case DT_RELA: rela = FIX(dyn->d_un.d_ptr); break;
+            case DT_RELASZ: relasz = dyn->d_un.d_val; break;
+        }
+    }
+    int *count = (int *)data;
+    for (int pass = 0; pass < 2; pass++) {
+        const ElfW(Rela) *r = (const ElfW(Rela) *)(pass ? rela : jmprel);
+        size_t n = (pass ? relasz : pltsz) / sizeof(ElfW(Rela));
+        if (!r || !symtab || !strtab) continue;
+        for (size_t i = 0; i < n; i++) {
+            uint32_t type = ELF64_R_TYPE(r[i].r_info), sym = ELF64_R_SYM(r[i].r_info);
+            if (!sym || (type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_GLOB_DAT)) continue;
+            const char *nm = (const char *)strtab + ((const ElfW(Sym) *)symtab)[sym].st_name;
+            for (int k = 0; fh_tab[k].name; k++) {
+                if (strcmp(nm, fh_tab[k].name)) continue;
+                void **slot = (void **)(base + r[i].r_offset);
+                uintptr_t pg = (uintptr_t)slot & ~(uintptr_t)4095;
+                if (mprotect((void *)pg, 4096, PROT_READ | PROT_WRITE) == 0) { *slot = fh_tab[k].fn; (*count)++; }
+            }
+        }
+    }
+    return 1;
+}
+
+static void *fh_thread(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 3000; i++) {            /* up to ~60 s, until the game library is loaded */
+        int count = 0;
+        if (dl_iterate_phdr(fh_patch_cb, &count) == 1) {
+            GLOG("file hooks: patched %d imports in librdr.so", count);
+            return NULL;
+        }
+        usleep(20000);
+    }
+    GLOG("file hooks: librdr.so never appeared");
+    return NULL;
+}
+
+JNIEXPORT void JNICALL
+Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz) {
+    (void)env; (void)thiz;
+    pthread_t t;
+    if (pthread_create(&t, NULL, fh_thread, NULL) == 0) pthread_detach(t);
+}

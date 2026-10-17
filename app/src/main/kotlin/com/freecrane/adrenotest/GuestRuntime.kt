@@ -99,6 +99,7 @@ object GuestRuntime {
         try { GuestAssetPacks.extractAll(root) }
         catch (t: Throwable) { Log.w(TAG, "unpacking packs failed: $t") }
         GuestAssetPacks.prewarm(loader, root)
+        try { Native.installFileHooks() } catch (t: Throwable) { Log.w(TAG, "file hooks failed: $t") }
         try { Log.i(TAG, Native.installFindClassHook(loader)) }
         catch (t: Throwable) { Log.w(TAG, "FindClass hook failed: $t") }
         // Build 38: show where the game's threads are, shortly after launch and again later.
