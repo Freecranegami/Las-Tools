@@ -360,6 +360,19 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun chooseGpu(out: TextView) {
+        val labels = GpuSpoof.presets.map { it.label }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("GPU the game sees")
+            .setSingleChoiceItems(labels, GpuSpoof.index(this)) { d, which ->
+                GpuSpoof.set(this, which)
+                out.text = "GPU spoof: ${GpuSpoof.presets[which].label}\nApplies the next time the game starts."
+                d.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     // ---------- UI ----------
 
     private fun btn(label: String, onClick: () -> Unit): Button =
@@ -407,7 +420,8 @@ class MainActivity : Activity() {
             addView(row(
                 btn("Show log") { showLog() },
                 btn("Copy log") { copyLog() },
-                btn("Guest log") { GuestLog.copy(this@MainActivity, out) }))
+                btn("Guest log") { GuestLog.copy(this@MainActivity, out) },
+                btn("GPU spoof") { chooseGpu(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))

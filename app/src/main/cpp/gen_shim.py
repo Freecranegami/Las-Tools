@@ -49,6 +49,8 @@ def wrappable(n):
 COUNTED = {"vkQueuePresentKHR": 1, "vkQueueSubmit": 2, "vkQueueSubmit2": 2, "vkQueueSubmit2KHR": 2,
            "vkAcquireNextImageKHR": 3, "vkAcquireNextImage2KHR": 3}
 PROC = ("vkGetInstanceProcAddr", "vkGetDeviceProcAddr")
+# void commands that return the GPU identity: rewritten from the LAS_GPU_* environment (set by the app)
+SPOOF = {"vkGetPhysicalDeviceProperties": 0, "vkGetPhysicalDeviceProperties2": 1, "vkGetPhysicalDeviceProperties2KHR": 1}
 wrapped = [n for n in names if wrappable(n) and n not in PROC]
 wrapped_set = set(wrapped)
 
@@ -106,6 +108,42 @@ lines.append("        vkshim_errs++;")
 lines.append('        __android_log_print(ANDROID_LOG_ERROR, "vkshim", "%s returned %d", vkshim_names[idx], res);')
 lines.append("    }")
 lines.append("}")
+spoof_c = r"""
+static unsigned long vkshim_hex(const char *s, unsigned long dflt) { return (s && *s) ? strtoul(s, NULL, 16) : dflt; }
+/* p points at a VkPhysicalDeviceProperties: apiVersion@0 driverVersion@4 vendorID@8 deviceID@12 deviceType@16 deviceName@20[256] */
+static void vkshim_spoof_props(unsigned char *p) {
+    static volatile int logged;
+    if (!logged && !__sync_lock_test_and_set(&logged, 1))
+        __android_log_print(ANDROID_LOG_INFO, "GuestHost", "vkshim: GPU as the driver reports it: name=\"%.100s\" vendor=0x%x device=0x%x api=0x%x driver=0x%x type=%u",
+            (const char *)(p + 20), *(unsigned *)(p + 8), *(unsigned *)(p + 12), *(unsigned *)p, *(unsigned *)(p + 4), *(unsigned *)(p + 16));
+    const char *nm = getenv("LAS_GPU_NAME");
+    if (!nm || !*nm) return;
+    strncpy((char *)p + 20, nm, 255); p[20 + 255] = 0;
+    *(unsigned *)(p + 8) = (unsigned)vkshim_hex(getenv("LAS_GPU_VENDOR"), *(unsigned *)(p + 8));
+    *(unsigned *)(p + 12) = (unsigned)vkshim_hex(getenv("LAS_GPU_DEVICE"), *(unsigned *)(p + 12));
+}
+/* walk a pNext chain: log (and optionally spoof) the driver identity (DRIVER_PROPERTIES, or VULKAN_1_2_PROPERTIES) */
+static void vkshim_spoof_chain(unsigned char *p2) {
+    static volatile int logged;
+    const char *drv = getenv("LAS_GPU_DRIVER");
+    unsigned char *n = *(unsigned char **)(p2 + 8);
+    for (int hops = 0; n && hops < 64; hops++, n = *(unsigned char **)(n + 8)) {
+        int st = *(int *)n;
+        if (st != 1000196000 && st != 52) continue;
+        if (__sync_fetch_and_add(&logged, 1) < 2)
+            __android_log_print(ANDROID_LOG_INFO, "GuestHost", "vkshim: driver as reported: id=%u name=\"%.80s\" info=\"%.80s\"",
+                *(unsigned *)(n + 16), (const char *)(n + 20), (const char *)(n + 276));
+        if (drv && *drv == '1') {
+            *(unsigned *)(n + 16) = 8;   /* VK_DRIVER_ID_QUALCOMM_PROPRIETARY */
+            strncpy((char *)n + 20, "Qualcomm Technologies Inc. Adreno Vulkan Driver", 255);
+            ((char *)n)[20 + 255] = 0;
+            ((char *)n)[276] = 0;
+        }
+    }
+}
+typedef void (*vkshim_f2v)(long, long);
+"""
+lines.append(spoof_c)
 lines.append("typedef long (*vkshim_f8)(long, long, long, long, long, long, long, long);")
 lines.append("typedef void *(*vkshim_gpa)(long, const char *);")
 lines.append("")
@@ -117,6 +155,15 @@ for i, n in enumerate(names):
         lines.append("    vkshim_after(%d, (int)r, %d);" % (i, COUNTED.get(n, 0)))
         lines.append("    return r;")
         lines.append("}")
+    elif n in SPOOF:
+        lines.append("__attribute__((visibility(\"default\"))) void %s(long a0, long a1) {" % n)
+        lines.append("    ((vkshim_f2v)vkshim_table[%d])(a0, a1);" % i)
+        if SPOOF[n]:
+            lines.append("    vkshim_spoof_props((unsigned char *)a1 + 16);")
+            lines.append("    vkshim_spoof_chain((unsigned char *)a1);")
+        else:
+            lines.append("    vkshim_spoof_props((unsigned char *)a1);")
+        lines.append("}")
     elif n in PROC:
         pass   # defined below, after the wrapper table exists
     else:
@@ -127,7 +174,7 @@ lines.append("__attribute__((visibility(\"default\"))) void *vkGetInstanceProcAd
 lines.append("__attribute__((visibility(\"default\"))) void *vkGetDeviceProcAddr(long, const char *);")
 lines.append("static void *const vkshim_wrap[VKSHIM_COUNT] = {")
 for n in names:
-    lines.append("    %s," % ("(void *)" + n if (n in wrapped_set or n in PROC) and n in names else "0"))
+    lines.append("    %s," % ("(void *)" + n if (n in wrapped_set or n in PROC or n in SPOOF) else "0"))
 lines.append("};")
 lines.append("static void *vkshim_lookup(const char *n, void *real) {")
 lines.append("    if (!real || !n) return real;")
@@ -171,4 +218,4 @@ lines.append("}")
 
 with open(out, "w") as f:
     f.write("\n".join(lines) + "\n")
-print("generated %d stubs, %d logging wrappers" % (len(names), len(wrapped)))
+print("generated %d stubs, %d logging wrappers, %d spoof wrappers" % (len(names), len(wrapped), len([n for n in names if n in SPOOF])))
