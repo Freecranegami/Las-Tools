@@ -373,6 +373,20 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun chooseDevice(out: TextView) {
+        val labels = GpuSpoof.devices.map { it.label }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Phone the game sees (also sets GPU + CPU)")
+            .setSingleChoiceItems(labels, GpuSpoof.deviceIndex(this)) { d, which ->
+                GpuSpoof.setDevice(this, which)
+                out.text = "Device spoof: ${GpuSpoof.devices[which].label}\nGPU: ${GpuSpoof.presets[GpuSpoof.index(this)].label}\n" +
+                    "CPU: ${GpuSpoof.cpus[GpuSpoof.cpuIndex(this)].label}\nApplies the next time the game starts."
+                d.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun chooseCpu(out: TextView) {
         val labels = GpuSpoof.cpus.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
@@ -435,7 +449,8 @@ class MainActivity : Activity() {
                 btn("Copy log") { copyLog() },
                 btn("Guest log") { GuestLog.copy(this@MainActivity, out) },
                 btn("GPU spoof") { chooseGpu(out) },
-                btn("CPU spoof") { chooseCpu(out) }))
+                btn("CPU spoof") { chooseCpu(out) },
+                btn("Device spoof") { chooseDevice(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))

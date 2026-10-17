@@ -26,8 +26,13 @@ object GuestLog {
         "asset in ", "reflect impl methods", "NativeGameActivity methods", "audioTrackData",
         // big crash-report blocks we don't need
         "runtime.cc:761", "verification.cc", "MemMap", "NOTE:", "CRASH   :     x", "DEBUG   :     x",
-        "CRASH   :     lr", "DEBUG   :     lr", "Tombstone written"
+        "CRASH   :     lr", "DEBUG   :     lr", "Tombstone written",
+        // thousands of successful pack file lookups
+        "native-open access(", "native-open stat("
     )
+
+    // what the game asks about the device: always shown first, never cut
+    private val identityTokens = listOf("native-hw", "native-prop", "native-gl", "vkshim: GPU", "vkshim: driver", "GPU spoof", "file hooks", "native-model")
 
     private val important = listOf(
         " E ", " F ", "GuestHost", "GuestGame", "Unity", "JNI", "Abort", "signal", "vkshim",
@@ -87,19 +92,23 @@ object GuestLog {
             kept.add(if (c > 1) firstLine[key] + "   [x$c]" else firstLine[key]!!)
         }
 
+        val identity = kept.filter { l -> identityTokens.any { l.contains(it) } }.take(90)
+        kept.removeAll { l -> identityTokens.any { l.contains(it) } }
         val header = if (start >= 0) "[log since the last game launch, from the $source]"
                      else "[no game launch found, showing the recent log, from the $source]"
-        var text = header + "\n" + kept.joinToString("\n")
+        val idBlock = "--- device identity: what the game read and what it was told ---\n" +
+            (if (identity.isEmpty()) "(nothing logged)\n" else identity.joinToString("\n") + "\n") + "--- end of identity ---\n"
+        var text = header + "\n" + idBlock + kept.joinToString("\n")
         if (text.length > 22000) {
             // the lines right before the first fatal signal are the game's own last words
             val fatal = kept.indexOfFirst { it.contains("Fatal signal") }
             val from = if (fatal >= 0) maxOf(0, fatal - 80) else kept.size
             val trimmed = kept.filterIndexed { i, l ->
                 (i >= from && i <= (if (fatal >= 0) fatal else kept.size)) || isImportant(l) || i >= kept.size - 40 }
-            text = "$header [trimmed]\n" + trimmed.joinToString("\n")
+            text = "$header [trimmed]\n" + idBlock + trimmed.joinToString("\n")
         }
         return if (text.length <= 22000) text
-               else text.take(3000) + "\n...[cut]...\n" + text.takeLast(18000)
+               else text.take(3000 + idBlock.length) + "\n...[cut]...\n" + text.takeLast(18000)
     }
 
     fun copy(activity: Activity, out: TextView) {

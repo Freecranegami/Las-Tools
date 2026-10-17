@@ -1084,6 +1084,14 @@ static int h_spg(const char *name, char *value) {
     const char *sp = NULL;
     for (int i = 0; map[i].prop; i++)
         if (!strcmp(name, map[i].prop)) { const char *v = getenv(map[i].env); if (v && *v) sp = v; break; }
+    if (!sp && !strncmp(name, "ro.product.", 11)) {      /* ro.product.[vendor.|odm.|system.]model etc. */
+        const char *last = strrchr(name, '.') + 1;
+        const char *e = !strcmp(last, "model") ? "LAS_MODEL" : !strcmp(last, "manufacturer") ? "LAS_MANUFACTURER" :
+                        !strcmp(last, "brand") ? "LAS_BRAND" : !strcmp(last, "device") ? "LAS_DEVICE" :
+                        !strcmp(last, "name") ? "LAS_DEVICE" : NULL;
+        const char *v = e ? getenv(e) : NULL;
+        if (v && *v) sp = v;
+    }
     static volatile int logged = 0;
     if (logged < 60 && fh_first(name) && (sp || !strncmp(name, "ro.hardware", 11) || !strncmp(name, "ro.board", 8) || !strncmp(name, "ro.soc", 6) || !strncmp(name, "ro.product", 10) || strstr(name, "chip") || strstr(name, "gpu") || strstr(name, "soc"))) {
         logged++;

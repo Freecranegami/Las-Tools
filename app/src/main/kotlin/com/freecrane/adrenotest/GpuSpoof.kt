@@ -32,17 +32,37 @@ object GpuSpoof {
         CpuPreset("Snapdragon 8 Gen 3 (SM8650)", "SM8650", "pineapple", 3),
     )
 
+    // A whole phone model: games often pick graphics limits from a device-model list, not from the GPU.
+    // Choosing one also sets the matching GPU and CPU presets.
+    class DevicePreset(val label: String, val manufacturer: String, val brand: String, val model: String,
+                       val device: String, val gpuIndex: Int, val cpuIndex: Int)
+    val devices = listOf(
+        DevicePreset("Off (real phone model)", "", "", "", "", 0, 0),
+        DevicePreset("Samsung Galaxy S24 Ultra (Snapdragon 8 Gen 3, Adreno 750)", "samsung", "samsung", "SM-S928B", "e3q", 3, 3),
+        DevicePreset("Samsung Galaxy S23 Ultra (Snapdragon 8 Gen 2, Adreno 740)", "samsung", "samsung", "SM-S918B", "dm3q", 2, 2),
+    )
+
     private const val PREFS = "las"
 
+    fun deviceIndex(ctx: Context): Int =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("device_spoof", 1).coerceIn(0, devices.size - 1)
+
+    // sets the phone model and, with it, the matching GPU and CPU
+    fun setDevice(ctx: Context, i: Int) {
+        val d = devices[i]
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt("device_spoof", i).putInt("gpu_spoof", d.gpuIndex).putInt("cpu_spoof", d.cpuIndex).commit()
+    }
+
     fun index(ctx: Context): Int =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("gpu_spoof", 1).coerceIn(0, presets.size - 1)
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("gpu_spoof", devices[1].gpuIndex).coerceIn(0, presets.size - 1)
 
     fun set(ctx: Context, i: Int) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("gpu_spoof", i).commit()
     }
 
     fun cpuIndex(ctx: Context): Int =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("cpu_spoof", 1).coerceIn(0, cpus.size - 1)
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("cpu_spoof", devices[1].cpuIndex).coerceIn(0, cpus.size - 1)
 
     fun setCpu(ctx: Context, i: Int) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("cpu_spoof", i).commit()
@@ -64,7 +84,16 @@ object GpuSpoof {
     fun apply(ctx: Context) {
         val g = presets[index(ctx)]
         val c = cpus[cpuIndex(ctx)]
+        val m = devices[deviceIndex(ctx)]
         try {
+            env("LAS_MODEL", m.model)
+            env("LAS_MANUFACTURER", m.manufacturer)
+            env("LAS_BRAND", m.brand)
+            env("LAS_DEVICE", m.device)
+            if (m.model.isNotEmpty()) {
+                setBuild("MODEL", m.model); setBuild("MANUFACTURER", m.manufacturer)
+                setBuild("BRAND", m.brand); setBuild("DEVICE", m.device); setBuild("PRODUCT", m.device)
+            }
             env("LAS_GPU_NAME", g.name)
             env("LAS_GPU_VENDOR", if (g.name.isEmpty()) "" else "5143")
             env("LAS_GPU_DEVICE", g.device)
@@ -92,7 +121,7 @@ object GpuSpoof {
                     setBuild("SOC_MANUFACTURER", "Qualcomm")
                 }
             }
-            android.util.Log.i("GuestHost", "GPU spoof: ${g.label}; CPU spoof: ${c.label}")
+            android.util.Log.i("GuestHost", "GPU spoof: ${g.label}; CPU spoof: ${c.label}; device spoof: ${m.label} (Build.MODEL now ${Build.MODEL}, HARDWARE ${Build.HARDWARE}, BOARD ${Build.BOARD})")
         } catch (t: Throwable) {
             android.util.Log.w("GuestHost", "device spoof failed: $t")
         }
