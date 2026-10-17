@@ -575,7 +575,9 @@ static volatile int g_wrap_ok = 0;
 static jobject g_last_orig = NULL, g_last_proxy = NULL;
 static pthread_mutex_t g_wrap_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static void note_pack_mid(JNIEnv *e, jclass c, const char *n, const char *sg) {
+static struct { jmethodID id; const char *name; } g_pack_mids[16];
+static int g_pack_n = 0;
+static void note_pack_mid(JNIEnv *e, jclass c, const char *n, const char *sg, jmethodID mid) {
     static const char *names[] = {"fetch", "getPackLocation", "getPackStates", "getPackLocations", "getAssetLocation"};
     if (!n || !sg || !c || !g_cls_getname || !g_cls_isiface || t_in_wrap) return;
     int hit = 0;
@@ -589,7 +591,11 @@ static void note_pack_mid(JNIEnv *e, jclass c, const char *n, const char *sg) {
     GLOG("asset packs: native code resolved %s%s on %s (interface=%d)", n, sg, u ? u : "?", (int)ifc);
     if (u) (*e)->ReleaseStringUTFChars(e, js, u);
     if (js) (*e)->DeleteLocalRef(e, js);
-    if (!strcmp(n, "fetch")) g_wrap_ok = ifc ? 1 : 0;
+    if (mid && g_pack_n < 16) {
+        const char *keep = !strcmp(n, "fetch") ? "fetch" : !strcmp(n, "getPackStates") ? "getPackStates" :
+                           !strcmp(n, "getPackLocation") ? "getPackLocation" : NULL;
+        if (keep) { g_pack_mids[g_pack_n].id = mid; g_pack_mids[g_pack_n].name = keep; g_pack_n++; }
+    }
     t_in_wrap = 0;
 }
 
@@ -620,8 +626,29 @@ static jobject maybe_wrap(JNIEnv *e, jobject r) {
     return out;
 }
 
+
+/* Answer the pack manager's fetch / getPackStates / getPackLocation from the packs that are on the phone, whatever
+ * class the native code resolved the method on. Returns NULL to let the original call go ahead. */
+static jmethodID g_local_mid = NULL;
+static const char *pack_mid_name(jmethodID m) {
+    for (int i = 0; i < g_pack_n; i++) if (g_pack_mids[i].id == m) return g_pack_mids[i].name;
+    return NULL;
+}
+static jobject try_local(JNIEnv *e, jobject o, jmethodID m, jobject arg) {
+    const char *nm = pack_mid_name(m);
+    if (!nm || !g_wrap_cls || !g_local_mid || t_in_wrap || !g_mgr_cls || !o) return NULL;
+    if (!(*e)->IsInstanceOf(e, o, g_mgr_cls)) return NULL;
+    t_in_wrap = 1;
+    jstring js = (*e)->NewStringUTF(e, nm);
+    jobject r = (*e)->CallStaticObjectMethod(e, g_wrap_cls, g_local_mid, o, js, arg);
+    t_in_wrap = 0;
+    (*e)->DeleteLocalRef(e, js);
+    if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionClear(e); return NULL; }
+    return r;
+}
+
 static jmethodID h_getmid(JNIEnv *e, jclass c, const char *n, const char *sg) {
-    jmethodID r = o_getmid(e, c, n, sg); mid_note(r, n, sg); note_pack_mid(e, c, n, sg); rec("GetMethodID %s %s -> %p", n, sg, r); return r; }
+    jmethodID r = o_getmid(e, c, n, sg); mid_note(r, n, sg); note_pack_mid(e, c, n, sg, r); rec("GetMethodID %s %s -> %p", n, sg, r); return r; }
 static jmethodID h_getsmid(JNIEnv *e, jclass c, const char *n, const char *sg) {
     jmethodID r = o_getsmid(e, c, n, sg); mid_note(r, n, sg); rec("GetStaticMethodID %s %s -> %p", n, sg, r); return r; }
 static jfieldID h_getfid(JNIEnv *e, jclass c, const char *n, const char *sg) {
@@ -666,6 +693,10 @@ static CallSOV o_csov; static CallOV o_cov;
 static jobject h_csov(JNIEnv *e, jclass c, jmethodID m, va_list ap) {
     jobject r = o_csov(e, c, m, ap); return after_obj(e, "CallStaticObjectMethodV", m, r); }
 static jobject h_cov(JNIEnv *e, jobject o, jmethodID m, va_list ap) {
+    if (pack_mid_name(m)) {
+        va_list a2; va_copy(a2, ap); jobject arg = va_arg(a2, jobject); va_end(a2);
+        jobject l = try_local(e, o, m, arg); if (l) return l;
+    }
     jobject r = o_cov(e, o, m, ap); return after_obj(e, "CallObjectMethodV", m, r); }
 static jobject h_csom(JNIEnv *e, jclass c, jmethodID m, ...) {
     va_list ap; va_start(ap, m);
@@ -674,6 +705,10 @@ static jobject h_csom(JNIEnv *e, jclass c, jmethodID m, ...) {
 }
 static jobject h_com(JNIEnv *e, jobject o, jmethodID m, ...) {
     va_list ap; va_start(ap, m);
+    if (pack_mid_name(m)) {
+        va_list a2; va_copy(a2, ap); jobject arg = va_arg(a2, jobject); va_end(a2);
+        jobject l = try_local(e, o, m, arg); if (l) { va_end(ap); return l; }
+    }
     jobject r = o_cov ? o_cov(e, o, m, ap) : (*e)->CallObjectMethodV(e, o, m, ap);
     va_end(ap); return after_obj(e, "CallObjectMethod", m, r);
 }
@@ -683,6 +718,7 @@ static CallSOA o_csoa; static CallOA o_coa;
 static jobject h_csoa(JNIEnv *e, jclass c, jmethodID m, const jvalue *a) {
     jobject r = o_csoa(e, c, m, a); return after_obj(e, "CallStaticObjectMethodA", m, r); }
 static jobject h_coa(JNIEnv *e, jobject o, jmethodID m, const jvalue *a) {
+    if (pack_mid_name(m) && a) { jobject l = try_local(e, o, m, a[0].l); if (l) return l; }
     jobject r = o_coa(e, o, m, a); return after_obj(e, "CallObjectMethodA", m, r); }
 
 static int patch_slot(void **slot, void *fn, void **orig) {
@@ -713,6 +749,8 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
         if (w) {
             g_wrap_cls = (jclass)(*env)->NewGlobalRef(env, w);
             g_wrap_mid = (*env)->GetStaticMethodID(env, w, "wrap", "(Ljava/lang/Object;)Ljava/lang/Object;");
+            g_local_mid = (*env)->GetStaticMethodID(env, w, "localCall",
+                "(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;");
         }
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     }

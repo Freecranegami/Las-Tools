@@ -18,6 +18,26 @@ object GuestAssetPacks {
     private const val PKG = "com.google.android.play.core.assetpacks."
     private var dumped = false
 
+    private val proxies = java.util.IdentityHashMap<Any, Any>()
+
+    // Called from the native hook when the game's native code calls fetch / getPackStates / getPackLocation
+    // on the real pack manager. Packs that are on the phone are answered here; null means "go ahead as normal".
+    @JvmStatic
+    fun localCall(real: Any, name: String, arg: Any?): Any? {
+        return try {
+            if (real is Proxy) return null
+            val proxy = synchronized(proxies) { proxies.getOrPut(real) { doWrap(real) } }
+            if (proxy === real) return null
+            val ld = GuestRuntime.current?.loader ?: real.javaClass.classLoader
+            val mgr = Class.forName(PKG + "AssetPackManager", false, ld)
+            val m = mgr.methods.firstOrNull { it.name == name && it.parameterCount == 1 } ?: return null
+            try { m.invoke(proxy, arg) } catch (e: InvocationTargetException) { throw e.targetException }
+        } catch (t: Throwable) {
+            Log.w(TAG, "asset packs: local $name failed: $t")
+            null
+        }
+    }
+
     @JvmStatic
     fun wrap(real: Any): Any {
         return try {
