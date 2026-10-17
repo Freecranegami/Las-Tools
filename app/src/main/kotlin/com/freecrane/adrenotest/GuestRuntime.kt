@@ -96,6 +96,8 @@ object GuestRuntime {
                 "${f.name} ${f.length() / 1024}KB assets=$n"
             })
         } catch (t: Throwable) { Log.w(TAG, "split listing failed: $t") }
+        try { GuestAssetPacks.extractAll(root) }
+        catch (t: Throwable) { Log.w(TAG, "unpacking packs failed: $t") }
         try { Log.i(TAG, Native.installFindClassHook(loader)) }
         catch (t: Throwable) { Log.w(TAG, "FindClass hook failed: $t") }
         // Build 38: show where the game's threads are, shortly after launch and again later.

@@ -237,6 +237,17 @@ object GuestAssetPacks {
     // Unpack the split APK(s) of an asset pack into a plain folder (guests/<pkg>/packs/<name>/),
     // so the game can read its data with ordinary file paths. Done lazily once per pack; a marker
     // file skips re-extraction until the game is re-imported (which wipes this folder).
+    // Unpack every pack up front (before the game boots), so no game thread ever waits on one.
+    @JvmStatic
+    fun extractAll(root: File) {
+        val packs = LinkedHashMap<String, MutableList<File>>()
+        for (f in Util.guestSplits(root)) packs.getOrPut(canonicalName(f)) { ArrayList() }.add(f)
+        Log.i(TAG, "asset packs: unpacking all before launch: " + packs.keys)
+        for ((n, fs) in packs) ensureExtracted(n, root, fs)
+        Log.i(TAG, "asset packs: all packs unpacked")
+    }
+
+    @Synchronized
     private fun ensureExtracted(name: String, root: File, splits: List<File>): File? {
         if (splits.isEmpty()) return null
         val dir = File(root, "packs/" + name.substringBefore('-'))
