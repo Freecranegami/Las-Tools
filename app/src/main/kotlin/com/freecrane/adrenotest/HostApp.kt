@@ -93,9 +93,10 @@ object GuestLogFile {
             try {
                 val f = file(ctx)
                 if (f.exists() && f.length() > MAX) f.delete()
-                val p = ProcessBuilder("logcat", "-v", "threadtime", "-T", since, "-b", "main", "-b", "system", "-b", "crash",
-                    "*:S", "GuestHost:V", "PlayCore:V", "playcore:V", "libc:V", "DEBUG:V", "AndroidRuntime:V",
-                    "nativeloader:D", "art:W", "ActivityThread:E").redirectErrorStream(true).start()
+                // everything this process logs (the game's own messages say why it aborts), plus crash reports
+                val pid = android.os.Process.myPid().toString()
+                val p = ProcessBuilder("logcat", "-v", "threadtime", "-T", since, "--pid=$pid", "-b", "main", "-b", "crash")
+                    .redirectErrorStream(true).start()
                 val out = java.io.FileOutputStream(f, true)
                 p.inputStream.bufferedReader().useLines { lines ->
                     for (l in lines) {

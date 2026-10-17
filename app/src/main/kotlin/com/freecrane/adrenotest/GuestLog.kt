@@ -91,7 +91,11 @@ object GuestLog {
                      else "[no game launch found, showing the recent log, from the $source]"
         var text = header + "\n" + kept.joinToString("\n")
         if (text.length > 22000) {
-            val trimmed = kept.filterIndexed { i, l -> isImportant(l) || i >= kept.size - 40 }
+            // the lines right before the first fatal signal are the game's own last words
+            val fatal = kept.indexOfFirst { it.contains("Fatal signal") }
+            val from = if (fatal >= 0) maxOf(0, fatal - 80) else kept.size
+            val trimmed = kept.filterIndexed { i, l ->
+                (i >= from && i <= (if (fatal >= 0) fatal else kept.size)) || isImportant(l) || i >= kept.size - 40 }
             text = "$header [trimmed]\n" + trimmed.joinToString("\n")
         }
         return if (text.length <= 22000) text
