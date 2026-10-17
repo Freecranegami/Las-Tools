@@ -169,6 +169,9 @@ object GuestAssetPacks {
                     String::class.java -> if (si++ == 0) n else ""
                     Int::class.javaPrimitiveType -> ints.getOrElse(ii++) { 0 }
                     Long::class.javaPrimitiveType -> if (li++ < 2) size else 0L
+                    Double::class.javaPrimitiveType -> 1.0   // transfer progress: finished
+                    Float::class.javaPrimitiveType -> 1.0f
+                    Boolean::class.javaPrimitiveType -> false
                     else -> null
                 }
             }
@@ -184,6 +187,9 @@ object GuestAssetPacks {
                 Map::class.java.isAssignableFrom(t) -> map
                 t == Long::class.javaPrimitiveType -> total
                 t == Int::class.javaPrimitiveType -> 0
+                t == Double::class.javaPrimitiveType -> 1.0
+                t == Float::class.javaPrimitiveType -> 1.0f
+                t == Boolean::class.javaPrimitiveType -> false
                 else -> null
             }
         }
