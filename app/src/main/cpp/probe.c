@@ -560,8 +560,68 @@ static const char *mid_name(jmethodID id) {
     for (int i = 0; i < MID_N; i++) if (g_mids[i].id == id) return g_mids[i].txt;
     return "?";
 }
+static jclass g_wrap_cls = NULL;
+static jmethodID g_wrap_mid = NULL;
+static __thread int t_in_wrap = 0;
+
+/* The game's native code reads its asset-pack manager out of a Java field. When that object is read, hand it a
+ * manager that answers for packs that are really on the phone (see GuestAssetPacks). This is only safe when the
+ * native code calls the manager through the AssetPackManager interface (a proxy is not the concrete class), so it
+ * is switched on only after the native code is seen resolving "fetch" on an interface. */
+#include <pthread.h>
+static jclass g_mgr_cls = NULL;
+static jmethodID g_cls_getname = NULL, g_cls_isiface = NULL;
+static volatile int g_wrap_ok = 0;
+static jobject g_last_orig = NULL, g_last_proxy = NULL;
+static pthread_mutex_t g_wrap_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void note_pack_mid(JNIEnv *e, jclass c, const char *n, const char *sg) {
+    static const char *names[] = {"fetch", "getPackLocation", "getPackStates", "getPackLocations", "getAssetLocation"};
+    if (!n || !sg || !c || !g_cls_getname || !g_cls_isiface || t_in_wrap) return;
+    int hit = 0;
+    for (unsigned i = 0; i < sizeof names / sizeof *names; i++) if (!strcmp(n, names[i])) hit = 1;
+    if (!hit || !(strstr(sg, "assetpacks") || strstr(sg, "gms/tasks/Task"))) return;
+    t_in_wrap = 1;
+    jboolean ifc = (*e)->CallBooleanMethod(e, c, g_cls_isiface);
+    jstring js = (jstring)(*e)->CallObjectMethod(e, c, g_cls_getname);
+    if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+    const char *u = js ? (*e)->GetStringUTFChars(e, js, NULL) : NULL;
+    GLOG("asset packs: native code resolved %s%s on %s (interface=%d)", n, sg, u ? u : "?", (int)ifc);
+    if (u) (*e)->ReleaseStringUTFChars(e, js, u);
+    if (js) (*e)->DeleteLocalRef(e, js);
+    if (!strcmp(n, "fetch")) g_wrap_ok = ifc ? 1 : 0;
+    t_in_wrap = 0;
+}
+
+static jobject maybe_wrap(JNIEnv *e, jobject r) {
+    if (!r || !g_mgr_cls || !g_wrap_ok || t_in_wrap || !g_wrap_cls || !g_wrap_mid) return r;
+    if (!(*e)->IsInstanceOf(e, r, g_mgr_cls)) return r;
+    jobject out = r;
+    pthread_mutex_lock(&g_wrap_lock);
+    if (g_last_proxy && (*e)->IsSameObject(e, r, g_last_proxy)) {
+        out = r;
+    } else if (g_last_orig && g_last_proxy && (*e)->IsSameObject(e, r, g_last_orig)) {
+        out = (*e)->NewLocalRef(e, g_last_proxy);
+    } else {
+        t_in_wrap = 1;
+        jobject w = (*e)->CallStaticObjectMethod(e, g_wrap_cls, g_wrap_mid, r);
+        t_in_wrap = 0;
+        if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionClear(e); GLOG("asset packs: wrapping the manager threw"); }
+        else if (w) {
+            if (g_last_orig) (*e)->DeleteGlobalRef(e, g_last_orig);
+            if (g_last_proxy) (*e)->DeleteGlobalRef(e, g_last_proxy);
+            g_last_orig = (*e)->NewGlobalRef(e, r);
+            g_last_proxy = (*e)->NewGlobalRef(e, w);
+            GLOG("asset packs: the game's native code now gets the local pack manager");
+            out = w;
+        }
+    }
+    pthread_mutex_unlock(&g_wrap_lock);
+    return out;
+}
+
 static jmethodID h_getmid(JNIEnv *e, jclass c, const char *n, const char *sg) {
-    jmethodID r = o_getmid(e, c, n, sg); mid_note(r, n, sg); rec("GetMethodID %s %s -> %p", n, sg, r); return r; }
+    jmethodID r = o_getmid(e, c, n, sg); mid_note(r, n, sg); note_pack_mid(e, c, n, sg); rec("GetMethodID %s %s -> %p", n, sg, r); return r; }
 static jmethodID h_getsmid(JNIEnv *e, jclass c, const char *n, const char *sg) {
     jmethodID r = o_getsmid(e, c, n, sg); mid_note(r, n, sg); rec("GetStaticMethodID %s %s -> %p", n, sg, r); return r; }
 static jfieldID h_getfid(JNIEnv *e, jclass c, const char *n, const char *sg) {
@@ -569,9 +629,9 @@ static jfieldID h_getfid(JNIEnv *e, jclass c, const char *n, const char *sg) {
 static jfieldID h_getsfid(JNIEnv *e, jclass c, const char *n, const char *sg) {
     jfieldID r = o_getsfid(e, c, n, sg); rec("GetStaticFieldID %s %s -> %p", n, sg, r); return r; }
 static jobject h_getsobj(JNIEnv *e, jclass c, jfieldID f) {
-    jobject r = o_getsobj(e, c, f); rec("GetStaticObjectField %p -> %s", f, r ? "obj" : "NULL"); return r; }
+    jobject r = o_getsobj(e, c, f); rec("GetStaticObjectField %p -> %s", f, r ? "obj" : "NULL"); return maybe_wrap(e, r); }
 static jobject h_getobj(JNIEnv *e, jobject o, jfieldID f) {
-    jobject r = o_getobj(e, o, f); rec("GetObjectField %p -> %s", f, r ? "obj" : "NULL"); return r; }
+    jobject r = o_getobj(e, o, f); rec("GetObjectField %p -> %s", f, r ? "obj" : "NULL"); return maybe_wrap(e, r); }
 static jclass h_getobjcls(JNIEnv *e, jobject o) {
     if (!o) {
         Dl_info di; memset(&di, 0, sizeof di);
@@ -584,22 +644,8 @@ static jclass h_getobjcls(JNIEnv *e, jobject o) {
     return o_getobjcls(e, o);
 }
 
-static jclass g_wrap_cls = NULL;
-static jmethodID g_wrap_mid = NULL;
-
-static __thread int t_in_wrap = 0;
 static jobject after_obj(JNIEnv *e, const char *kind, jmethodID m, jobject r) {
     rec("%s %s -> %s", kind, mid_name(m), r ? "obj" : "NULL");
-    /* The game's native code gets its asset-pack manager from AssetPackManagerFactory.getInstance(Context).
-     * Hand it a manager that answers for packs that are really on the phone (see GuestAssetPacks). */
-    if (r && g_wrap_cls && g_wrap_mid && !t_in_wrap &&
-        !strncmp(mid_name(m), "getInstance(Landroid/content/Context;)Lcom/google/android/play/core/assetpacks/AssetPackManager;", 96)) {
-        t_in_wrap = 1;
-        jobject w = (*e)->CallStaticObjectMethod(e, g_wrap_cls, g_wrap_mid, r);
-        t_in_wrap = 0;
-        if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionClear(e); rec("   wrap threw"); }
-        else if (w) { rec("   AssetPackManager wrapped"); GLOG("asset packs: native getInstance -> wrapped manager"); return w; }
-    }
     if (!r && (*e)->ExceptionCheck(e)) {
         jthrowable t = (*e)->ExceptionOccurred(e);
         (*e)->ExceptionClear(e);
@@ -669,6 +715,18 @@ Java_com_freecrane_adrenotest_Native_installFindClassHook(JNIEnv *env, jobject t
             g_wrap_mid = (*env)->GetStaticMethodID(env, w, "wrap", "(Ljava/lang/Object;)Ljava/lang/Object;");
         }
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    }
+    if (!g_cls_getname) {
+        g_cls_getname = (*env)->GetMethodID(env, g_class_class, "getName", "()Ljava/lang/String;");
+        g_cls_isiface = (*env)->GetMethodID(env, g_class_class, "isInterface", "()Z");
+    }
+    if (!g_mgr_cls) {
+        jstring nm = (*env)->NewStringUTF(env, "com.google.android.play.core.assetpacks.AssetPackManager");
+        jobject k = (*env)->CallStaticObjectMethod(env, g_class_class, g_for_name, nm, JNI_TRUE, g_game_loader);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        else if (k) g_mgr_cls = (jclass)(*env)->NewGlobalRef(env, k);
+        (*env)->DeleteLocalRef(env, nm);
+        GLOG("asset packs: AssetPackManager class %s", g_mgr_cls ? "found" : "not found");
     }
     void **slot = (void **)&(*env)->FindClass;
     if (*slot == (void *)hooked_FindClass) return (*env)->NewStringUTF(env, "FindClass hook already installed");
