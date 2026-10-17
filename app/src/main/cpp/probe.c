@@ -942,38 +942,75 @@ static int fh_boring(const char *p) {
     for (int i = 0; skip[i]; i++) if (!strncmp(p, skip[i], strlen(skip[i]))) return 1;
     return 0;
 }
-static void fh_note(const char *fn, const char *p, int r, int e) {
+/* at most 3 failures logged per directory, so a probe over hundreds of files does not bury the log */
+#define FH_DIRS 512
+static volatile uint32_t g_dirh[FH_DIRS], g_dirn[FH_DIRS];
+static int fh_dir_ok(const char *p) {
+    const char *sl = strrchr(p, '/');
+    uint32_t h = 2166136261u;
+    for (const char *q = p; q < sl; q++) h = (h ^ (uint8_t)*q) * 16777619u;
+    h |= 1;
+    uint32_t i = h % FH_DIRS;
+    for (int n = 0; n < FH_DIRS; n++, i = (i + 1) % FH_DIRS) {
+        if (g_dirh[i] == h) return ++g_dirn[i] <= 3;
+        if (g_dirh[i] == 0) { g_dirh[i] = h; g_dirn[i] = 1; return 1; }
+    }
+    return 0;
+}
+#define OPEN_RING 1024
+static struct { char name[168]; long rv; const char *fn; } g_oring[OPEN_RING];
+static volatile unsigned g_oring_n = 0;
+static void oring_add(const char *fn, const char *name, long rv) {
+    unsigned i = __sync_fetch_and_add(&g_oring_n, 1) % OPEN_RING;
+    strncpy(g_oring[i].name, name, sizeof g_oring[i].name - 1);
+    g_oring[i].name[sizeof g_oring[i].name - 1] = 0;
+    g_oring[i].rv = rv; g_oring[i].fn = fn;
+}
+static void fh_note(const char *fn, const char *p, int failed, int e, long rv) {
+    if (p && !failed && strchr(p, '/') && !fh_boring(p) && strcmp(fn, "access") && strcmp(fn, "stat") && strcmp(fn, "lstat") && strcmp(fn, "fstatat"))
+        oring_add(fn, p, rv);
     if (!p || !strchr(p, '/')) return;   /* shader-name lookups and the like are not paths */
-    if (r < 0) {
+    char key[300]; snprintf(key, sizeof key, "%s|%s", fn, p);
+    if (failed) {
         if (e == EEXIST || e == EINTR || e == EAGAIN || fh_boring(p)) return;
-        if (g_fail_logged >= 400 || !fh_first(p)) return;
+        if (g_fail_logged >= 300 || !fh_dir_ok(p) || !fh_first(key)) return;
         g_fail_logged++;
         GLOG("native-fail %s(%.230s) errno=%d", fn, p, e);
     } else if (strstr(p, "/packs/") || strstr(p, "/guests/")) {
-        if (g_ok_logged >= 120 || !fh_first(p)) return;
+        if (g_ok_logged >= 250 || !fh_first(key)) return;
         g_ok_logged++;
-        GLOG("native-open %s(%.230s)", fn, p);
+        GLOG("native-open %s(%.230s) -> 0x%lx", fn, p, rv);
     }
 }
 
 static int h_open(const char *p, int fl, ...) {
     va_list ap; va_start(ap, fl); mode_t m = (fl & O_CREAT) ? (mode_t)va_arg(ap, int) : 0; va_end(ap);
-    int r = open(p, fl, m); int e = errno; fh_note("open", p, r, e); errno = e; return r;
+    int r = open(p, fl, m); int e = errno; fh_note("open", p, r < 0, e, r); errno = e; return r;
 }
-static int h_open2(const char *p, int fl) { int r = open(p, fl, 0); int e = errno; fh_note("open", p, r, e); errno = e; return r; }
+static int h_open2(const char *p, int fl) { int r = open(p, fl, 0); int e = errno; fh_note("open", p, r < 0, e, r); errno = e; return r; }
 static int h_openat(int d, const char *p, int fl, ...) {
     va_list ap; va_start(ap, fl); mode_t m = (fl & O_CREAT) ? (mode_t)va_arg(ap, int) : 0; va_end(ap);
-    int r = openat(d, p, fl, m); int e = errno; if (p && p[0] == '/') fh_note("openat", p, r, e); errno = e; return r;
+    int r = openat(d, p, fl, m); int e = errno; if (p && p[0] == '/') fh_note("openat", p, r < 0, e, r); errno = e; return r;
 }
-static int h_openat2(int d, const char *p, int fl) { int r = openat(d, p, fl, 0); int e = errno; if (p && p[0] == '/') fh_note("openat", p, r, e); errno = e; return r; }
-static int h_stat(const char *p, struct stat *s) { int r = stat(p, s); int e = errno; fh_note("stat", p, r, e); errno = e; return r; }
-static int h_lstat(const char *p, struct stat *s) { int r = lstat(p, s); int e = errno; fh_note("lstat", p, r, e); errno = e; return r; }
-static int h_fstatat(int d, const char *p, struct stat *s, int f) { int r = fstatat(d, p, s, f); int e = errno; if (p && p[0] == '/') fh_note("fstatat", p, r, e); errno = e; return r; }
-static int h_access(const char *p, int m) { int r = access(p, m); int e = errno; fh_note("access", p, r, e); errno = e; return r; }
-static FILE *h_fopen(const char *p, const char *m) { FILE *r = fopen(p, m); int e = errno; fh_note("fopen", p, r ? 0 : -1, e); errno = e; return r; }
-static DIR *h_opendir(const char *p) { DIR *r = opendir(p); int e = errno; fh_note("opendir", p, r ? 0 : -1, e); errno = e; return r; }
+static int h_openat2(int d, const char *p, int fl) { int r = openat(d, p, fl, 0); int e = errno; if (p && p[0] == '/') fh_note("openat", p, r < 0, e, r); errno = e; return r; }
+static int h_stat(const char *p, struct stat *s) { int r = stat(p, s); int e = errno; fh_note("stat", p, r < 0, e, r); errno = e; return r; }
+static int h_lstat(const char *p, struct stat *s) { int r = lstat(p, s); int e = errno; fh_note("lstat", p, r < 0, e, r); errno = e; return r; }
+static int h_fstatat(int d, const char *p, struct stat *s, int f) { int r = fstatat(d, p, s, f); int e = errno; if (p && p[0] == '/') fh_note("fstatat", p, r < 0, e, r); errno = e; return r; }
+static int h_access(const char *p, int m) { int r = access(p, m); int e = errno; fh_note("access", p, r < 0, e, r); errno = e; return r; }
+static FILE *h_fopen(const char *p, const char *m) { FILE *r = fopen(p, m); int e = errno; fh_note("fopen", p, r == NULL, e, (long)r); errno = e; return r; }
+static DIR *h_opendir(const char *p) { DIR *r = opendir(p); int e = errno; fh_note("opendir", p, r == NULL, e, (long)r); errno = e; return r; }
+
+#include <android/asset_manager.h>
+static volatile int g_aam_logged = 0;
+static AAsset *h_aam_open(AAssetManager *m, const char *fn, int mode) {
+    AAsset *r = AAssetManager_open(m, fn, mode);
+    if (fn && r) oring_add("asset", fn, (long)r);
+    if (fn && g_aam_logged < 400) { g_aam_logged++; GLOG("native-asset open(%.200s) -> %p", fn, (void *)r); }
+    return r;
+}
 
 static const struct { const char *name; void *fn; } fh_tab[] = {
+    {"AAssetManager_open", h_aam_open},
     {"open", h_open}, {"__open_2", h_open2}, {"openat", h_openat}, {"__openat_2", h_openat2},
     {"stat", h_stat}, {"lstat", h_lstat}, {"fstatat", h_fstatat}, {"access", h_access},
     {"fopen", h_fopen}, {"opendir", h_opendir}, {NULL, NULL}
@@ -1052,6 +1089,22 @@ Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz)
 static struct sigaction g_old_segv, g_old_bus;
 static volatile int g_crash_done = 0;
 
+static int g_pipe[2] = {-1, -1};
+/* copy memory that may be invalid without faulting: push it through a pipe, the kernel reports EFAULT */
+static int safe_read(void *dst, const void *src, size_t n) {
+    if (g_pipe[0] < 0 || n > 4096) return 0;
+    if (write(g_pipe[1], src, n) != (ssize_t)n) return 0;
+    return read(g_pipe[0], dst, n) == (ssize_t)n;
+}
+static void dump_mem(const char *label, uint64_t addr, size_t n) {
+    uint8_t buf[128];
+    if (n > sizeof buf || addr < 0x10000 || !safe_read(buf, (const void *)addr, n)) { GLOG("crash-mem %s @%llx unreadable", label, (unsigned long long)addr); return; }
+    for (size_t o = 0; o < n; o += 32) {
+        char line[100]; int k = 0;
+        for (size_t j = o; j < o + 32 && j < n; j++) k += snprintf(line + k, sizeof line - k, "%02x", buf[j]);
+        GLOG("crash-mem %s +0x%zx %s", label, o, line);
+    }
+}
 static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = (ucontext_t *)ctx;
     struct sigaction *old = (sig == SIGSEGV) ? &g_old_segv : &g_old_bus;
@@ -1068,7 +1121,25 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
                  i + 2, (unsigned long long)(i + 2 < 29 ? uc->uc_mcontext.regs[i + 2] : 0),
                  i + 3, (unsigned long long)(i + 3 < 29 ? uc->uc_mcontext.regs[i + 3] : 0));
         }
-        for (long off = -256; off < 64; off += 32) {
+        {
+            uint64_t want[3] = { uc->uc_mcontext.regs[1], 0, 0 };
+            safe_read(&want[1], (const void *)(uc->uc_mcontext.regs[19] + 8), 8);
+            safe_read(&want[2], (const void *)(uc->uc_mcontext.regs[19] + 0), 8);
+            unsigned total = g_oring_n, cnt = total < OPEN_RING ? total : OPEN_RING, hits = 0;
+            for (unsigned k = 0; k < cnt; k++) {
+                long rv = g_oring[k].rv;
+                for (int w = 0; w < 3; w++)
+                    if (want[w] && (uint64_t)rv == want[w]) { GLOG("crash-match %s(%.160s) -> 0x%lx (field %d)", g_oring[k].fn, g_oring[k].name, rv, w); hits++; }
+            }
+            GLOG("crash-match: %u of %u recorded opens matched the request", hits, cnt);
+            for (unsigned k = (cnt > 10 ? cnt - 10 : 0); k < cnt; k++) {
+                unsigned idx = (total < OPEN_RING) ? k : (total - cnt + k) % OPEN_RING;
+                GLOG("crash-recent %s(%.160s) -> 0x%lx", g_oring[idx].fn, g_oring[idx].name, g_oring[idx].rv);
+            }
+        }
+        dump_mem("x19", uc->uc_mcontext.regs[19], 96);
+        dump_mem("x1", uc->uc_mcontext.regs[1], 64);
+        for (long off = -64; off < 32; off += 32) {
             const uint8_t *q = (const uint8_t *)(pc + off);
             char line[128]; int n = 0;
             for (int k = 0; k < 32; k++) n += snprintf(line + n, sizeof line - n, "%02x", q[k]);
@@ -1091,6 +1162,7 @@ __attribute__((constructor)) static void crash_install(void) {
     sa.sa_sigaction = crash_handler;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
+    if (pipe(g_pipe) != 0) { g_pipe[0] = g_pipe[1] = -1; }
     sigaction(SIGSEGV, &sa, &g_old_segv);
     sigaction(SIGBUS, &sa, &g_old_bus);
 }
