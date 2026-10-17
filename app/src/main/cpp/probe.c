@@ -983,22 +983,57 @@ static void fh_note(const char *fn, const char *p, int failed, int e, long rv) {
     }
 }
 
+
+/* ---------- Build 58: the game's Android/data/<pkg> and Android/obb/<pkg> live in our own folder ----------
+ * The game writes its Vulkan cache and logs under /sdcard/Android/data/<its package>, which this app is
+ * not allowed to touch (errno 13). Paths under those folders are mapped into <guest dir>/ext/{data,obb}.
+ */
+static char g_pkg[160], g_ext[400];
+static int fh_mkdirs(const char *path) {          /* create every directory above the last '/' */
+    char tmp[1024]; size_t n = strlen(path);
+    if (n >= sizeof tmp) return -1;
+    memcpy(tmp, path, n + 1);
+    for (size_t i = 1; i < n; i++) if (tmp[i] == '/') { tmp[i] = 0; mkdir(tmp, 0771); tmp[i] = '/'; }
+    return 0;
+}
+static const char *fh_redirect(const char *p, char *buf, size_t n, int create) {
+    static const char *roots[] = { "/sdcard", "/storage/emulated/0", "/storage/self/primary", "/mnt/sdcard", "/data/media/0", NULL };
+    if (!p || !g_ext[0] || p[0] != '/') return p;
+    for (int i = 0; roots[i]; i++) {
+        size_t l = strlen(roots[i]);
+        if (strncmp(p, roots[i], l)) continue;
+        const char *q = p + l; const char *kind = NULL;
+        if (!strncmp(q, "/Android/data/", 14)) { kind = "data"; q += 14; }
+        else if (!strncmp(q, "/Android/obb/", 13)) { kind = "obb"; q += 13; }
+        else continue;
+        size_t pl = strlen(g_pkg);
+        if (strncmp(q, g_pkg, pl) || (q[pl] != '/' && q[pl] != 0)) continue;
+        snprintf(buf, n, "%s/%s%s", g_ext, kind, q + pl);
+        if (create) fh_mkdirs(buf);
+        return buf;
+    }
+    return p;
+}
+#define RD(p, c) char rb_[1024]; p = fh_redirect(p, rb_, sizeof rb_, c)
+
 static int h_open(const char *p, int fl, ...) {
+    RD(p, (fl & O_CREAT) != 0);
     va_list ap; va_start(ap, fl); mode_t m = (fl & O_CREAT) ? (mode_t)va_arg(ap, int) : 0; va_end(ap);
     int r = open(p, fl, m); int e = errno; fh_note("open", p, r < 0, e, r); errno = e; return r;
 }
-static int h_open2(const char *p, int fl) { int r = open(p, fl, 0); int e = errno; fh_note("open", p, r < 0, e, r); errno = e; return r; }
+static int h_open2(const char *p, int fl) { RD(p, 0); int r = open(p, fl, 0); int e = errno; fh_note("open", p, r < 0, e, r); errno = e; return r; }
 static int h_openat(int d, const char *p, int fl, ...) {
+    RD(p, (fl & O_CREAT) != 0);
     va_list ap; va_start(ap, fl); mode_t m = (fl & O_CREAT) ? (mode_t)va_arg(ap, int) : 0; va_end(ap);
     int r = openat(d, p, fl, m); int e = errno; if (p && p[0] == '/') fh_note("openat", p, r < 0, e, r); errno = e; return r;
 }
-static int h_openat2(int d, const char *p, int fl) { int r = openat(d, p, fl, 0); int e = errno; if (p && p[0] == '/') fh_note("openat", p, r < 0, e, r); errno = e; return r; }
-static int h_stat(const char *p, struct stat *s) { int r = stat(p, s); int e = errno; fh_note("stat", p, r < 0, e, r); errno = e; return r; }
-static int h_lstat(const char *p, struct stat *s) { int r = lstat(p, s); int e = errno; fh_note("lstat", p, r < 0, e, r); errno = e; return r; }
-static int h_fstatat(int d, const char *p, struct stat *s, int f) { int r = fstatat(d, p, s, f); int e = errno; if (p && p[0] == '/') fh_note("fstatat", p, r < 0, e, r); errno = e; return r; }
-static int h_access(const char *p, int m) { int r = access(p, m); int e = errno; fh_note("access", p, r < 0, e, r); errno = e; return r; }
-static FILE *h_fopen(const char *p, const char *m) { FILE *r = fopen(p, m); int e = errno; fh_note("fopen", p, r == NULL, e, (long)r); errno = e; return r; }
-static DIR *h_opendir(const char *p) { DIR *r = opendir(p); int e = errno; fh_note("opendir", p, r == NULL, e, (long)r); errno = e; return r; }
+static int h_openat2(int d, const char *p, int fl) { RD(p, 0); int r = openat(d, p, fl, 0); int e = errno; if (p && p[0] == '/') fh_note("openat", p, r < 0, e, r); errno = e; return r; }
+static int h_stat(const char *p, struct stat *s) { RD(p, 0); int r = stat(p, s); int e = errno; fh_note("stat", p, r < 0, e, r); errno = e; return r; }
+static int h_lstat(const char *p, struct stat *s) { RD(p, 0); int r = lstat(p, s); int e = errno; fh_note("lstat", p, r < 0, e, r); errno = e; return r; }
+static int h_fstatat(int d, const char *p, struct stat *s, int f) { RD(p, 0); int r = fstatat(d, p, s, f); int e = errno; if (p && p[0] == '/') fh_note("fstatat", p, r < 0, e, r); errno = e; return r; }
+static int h_access(const char *p, int m) { RD(p, 0); int r = access(p, m); int e = errno; fh_note("access", p, r < 0, e, r); errno = e; return r; }
+static FILE *h_fopen(const char *p, const char *m) { RD(p, (m && (strchr(m, 'w') || strchr(m, 'a') || strchr(m, '+')))); FILE *r = fopen(p, m); int e = errno; fh_note("fopen", p, r == NULL, e, (long)r); errno = e; return r; }
+static DIR *h_opendir(const char *p) { RD(p, 0); DIR *r = opendir(p); int e = errno; fh_note("opendir", p, r == NULL, e, (long)r); errno = e; return r; }
 
 #include <android/asset_manager.h>
 static volatile int g_aam_logged = 0;
@@ -1009,7 +1044,14 @@ static AAsset *h_aam_open(AAssetManager *m, const char *fn, int mode) {
     return r;
 }
 
+static int h_mkdir(const char *p, mode_t m) { RD(p, 1); return mkdir(p, m); }
+static int h_unlink(const char *p) { RD(p, 0); return unlink(p); }
+static int h_rmdir(const char *p) { RD(p, 0); return rmdir(p); }
+static int h_remove(const char *p) { RD(p, 0); return remove(p); }
+static int h_rename(const char *a, const char *b) { char ra[1024], rb2[1024]; a = fh_redirect(a, ra, sizeof ra, 0); b = fh_redirect(b, rb2, sizeof rb2, 1); return rename(a, b); }
+
 static const struct { const char *name; void *fn; } fh_tab[] = {
+    {"mkdir", h_mkdir}, {"unlink", h_unlink}, {"rmdir", h_rmdir}, {"remove", h_remove}, {"rename", h_rename},
     {"AAssetManager_open", h_aam_open},
     {"open", h_open}, {"__open_2", h_open2}, {"openat", h_openat}, {"__openat_2", h_openat2},
     {"stat", h_stat}, {"lstat", h_lstat}, {"fstatat", h_fstatat}, {"access", h_access},
@@ -1073,8 +1115,14 @@ static void *fh_thread(void *arg) {
 }
 
 JNIEXPORT void JNICALL
-Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz) {
-    (void)env; (void)thiz;
+Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz, jstring jpkg, jstring jext) {
+    (void)thiz;
+    const char *pk = jpkg ? (*env)->GetStringUTFChars(env, jpkg, NULL) : NULL;
+    const char *ex = jext ? (*env)->GetStringUTFChars(env, jext, NULL) : NULL;
+    if (pk) { strncpy(g_pkg, pk, sizeof g_pkg - 1); (*env)->ReleaseStringUTFChars(env, jpkg, pk); }
+    if (ex) { strncpy(g_ext, ex, sizeof g_ext - 1); (*env)->ReleaseStringUTFChars(env, jext, ex); }
+    if (g_ext[0]) { char t[500]; snprintf(t, sizeof t, "%s/data/x", g_ext); fh_mkdirs(t); snprintf(t, sizeof t, "%s/obb/x", g_ext); fh_mkdirs(t); }
+    GLOG("file hooks: Android/data and Android/obb of %s -> %s", g_pkg, g_ext);
     pthread_t t;
     if (pthread_create(&t, NULL, fh_thread, NULL) == 0) pthread_detach(t);
 }

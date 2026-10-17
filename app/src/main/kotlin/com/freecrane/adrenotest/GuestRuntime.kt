@@ -99,16 +99,11 @@ object GuestRuntime {
         try { GuestAssetPacks.extractAll(root) }
         catch (t: Throwable) { Log.w(TAG, "unpacking packs failed: $t") }
         GuestAssetPacks.prewarm(loader, root)
-        try { Native.installFileHooks() } catch (t: Throwable) { Log.w(TAG, "file hooks failed: $t") }
+        try { Native.installFileHooks(pkg, File(root, "ext").path) } catch (t: Throwable) { Log.w(TAG, "file hooks failed: $t") }
         try { Log.i(TAG, Native.installFindClassHook(loader)) }
         catch (t: Throwable) { Log.w(TAG, "FindClass hook failed: $t") }
-        // Build 38: show where the game's threads are, shortly after launch and again later.
-        Thread {
-            try {
-                Thread.sleep(10_000); Native.snapshot("10s")
-                Thread.sleep(15_000); Native.snapshot("25s")
-            } catch (t: Throwable) { Log.w(TAG, "snapshot failed: $t") }
-        }.also { it.isDaemon = true; it.name = "las-snapshot" }.start()
+        // Build 58: no more thread snapshots. They signal every game thread, which interrupts the
+        // game's own semaphore waits (that crashed its read worker and probably wedged its task system).
 
         val pm = app.packageManager
         val pi = pm.getPackageArchiveInfo(apk.path, PackageManager.GET_META_DATA)
