@@ -943,7 +943,7 @@ static int fh_boring(const char *p) {
     return 0;
 }
 static void fh_note(const char *fn, const char *p, int r, int e) {
-    if (!p) return;
+    if (!p || !strchr(p, '/')) return;   /* shader-name lookups and the like are not paths */
     if (r < 0) {
         if (e == EEXIST || e == EINTR || e == EAGAIN || fh_boring(p)) return;
         if (g_fail_logged >= 400 || !fh_first(p)) return;
@@ -979,10 +979,12 @@ static const struct { const char *name; void *fn; } fh_tab[] = {
     {"fopen", h_fopen}, {"opendir", h_opendir}, {NULL, NULL}
 };
 
+static uintptr_t g_rdr_base;
 static int fh_patch_cb(struct dl_phdr_info *info, size_t sz, void *data) {
     (void)sz;
     if (!info->dlpi_name || !strstr(info->dlpi_name, "librdr.so")) return 0;
     uintptr_t base = info->dlpi_addr;
+    g_rdr_base = base;
     const ElfW(Dyn) *dyn = NULL;
     for (int i = 0; i < info->dlpi_phnum; i++)
         if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) dyn = (const ElfW(Dyn) *)(base + info->dlpi_phdr[i].p_vaddr);
@@ -1038,4 +1040,57 @@ Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz)
     (void)env; (void)thiz;
     pthread_t t;
     if (pthread_create(&t, NULL, fh_thread, NULL) == 0) pthread_detach(t);
+}
+
+
+/* ---------- Build 55: when the game library itself faults, log registers and the code around pc ----------
+ * Disassembling these bytes offline shows which pointer was null and what the code was doing.
+ * Faults outside the game library (ART's own null checks) are passed straight on.
+ */
+#include <signal.h>
+#include <ucontext.h>
+static struct sigaction g_old_segv, g_old_bus;
+static volatile int g_crash_done = 0;
+
+static void crash_handler(int sig, siginfo_t *si, void *ctx) {
+    ucontext_t *uc = (ucontext_t *)ctx;
+    struct sigaction *old = (sig == SIGSEGV) ? &g_old_segv : &g_old_bus;
+    uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc;
+    uintptr_t base = g_rdr_base;
+    if (base && pc >= base && pc < base + 0x6000000 && !g_crash_done) {
+        g_crash_done = 1;
+        GLOG("crash-info sig=%d code=%d addr=%p tid=%d pc=librdr+0x%lx lr=librdr+0x%lx sp=%p base=%p",
+             sig, si->si_code, si->si_addr, (int)gettid(), (unsigned long)(pc - base),
+             (unsigned long)((uintptr_t)uc->uc_mcontext.regs[30] - base), (void *)uc->uc_mcontext.sp, (void *)base);
+        for (int i = 0; i < 29; i += 4) {
+            GLOG("crash-regs x%d=%llx x%d=%llx x%d=%llx x%d=%llx", i, (unsigned long long)uc->uc_mcontext.regs[i],
+                 i + 1, (unsigned long long)uc->uc_mcontext.regs[i + 1],
+                 i + 2, (unsigned long long)(i + 2 < 29 ? uc->uc_mcontext.regs[i + 2] : 0),
+                 i + 3, (unsigned long long)(i + 3 < 29 ? uc->uc_mcontext.regs[i + 3] : 0));
+        }
+        for (long off = -256; off < 64; off += 32) {
+            const uint8_t *q = (const uint8_t *)(pc + off);
+            char line[128]; int n = 0;
+            for (int k = 0; k < 32; k++) n += snprintf(line + n, sizeof line - n, "%02x", q[k]);
+            GLOG("crash-code +0x%lx %s", (unsigned long)(pc + off - base), line);
+        }
+    }
+    /* hand the signal on: put the old handler back and re-run the fault, or call it directly */
+    if (base && pc >= base && pc < base + 0x6000000) {
+        sigaction(sig, old, NULL);
+        return;
+    }
+    if (old->sa_flags & SA_SIGINFO) old->sa_sigaction(sig, si, ctx);
+    else if (old->sa_handler == SIG_DFL || old->sa_handler == SIG_IGN) { sigaction(sig, old, NULL); }
+    else old->sa_handler(sig);
+}
+
+__attribute__((constructor)) static void crash_install(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &g_old_segv);
+    sigaction(SIGBUS, &sa, &g_old_bus);
 }
