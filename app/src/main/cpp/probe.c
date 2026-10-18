@@ -1130,12 +1130,42 @@ static const struct { const char *name; void *fn; } fh_tab[] = {
     {"fopen", h_fopen}, {"opendir", h_opendir}, {NULL, NULL}
 };
 
+
+/* ---------- Build 64: kgsl ioctls of the Turnip driver ----------
+ * Turnip reports "device lost" when a kernel call on /dev/kgsl-3d0 fails or the GPU reset status is not clean.
+ * Failed calls (other than the retried EINTR/EAGAIN and normal timeouts) and a non-zero reset status are logged.
+ */
+#include <sys/ioctl.h>
+static int h_ioctl(int fd, int req, ...) {
+    va_list ap; va_start(ap, req); void *arg = va_arg(ap, void *); va_end(ap);
+    int r = ioctl(fd, req, arg); int e = errno;
+    unsigned long cmd = (unsigned long)(unsigned int)req;
+    if (r < 0 && e != EINTR && e != EAGAIN && e != ETIMEDOUT) {
+        char key[64]; snprintf(key, sizeof key, "ioctl|%lx|%d", cmd, e);
+        static volatile int n = 0;
+        if (n < 60 && fh_first(key)) { n++; GLOG("native-ioctl fd=%d cmd=0x%lx failed errno=%d", fd, cmd, e); }
+    } else if (r == 0 && cmd == 0xC0180902UL && arg) {          /* KGSL_IOCTL_DEVICE_GETPROPERTY */
+        struct { unsigned int type; unsigned int pad; void *value; size_t size; } *gp = arg;
+        if (gp->type == 9 && gp->size >= 4 && gp->value) {       /* KGSL_PROP_GPU_RESET_STAT */
+            unsigned v = *(volatile unsigned *)gp->value;
+            char key[48]; snprintf(key, sizeof key, "rst|%u", v);
+            static volatile int m = 0;
+            if (m < 20 && fh_first(key)) { m++; GLOG("native-ioctl kgsl GPU reset status = %u (0 = none, 1 = guilty, 2 = innocent, 3 = unknown)", v); }
+        }
+    }
+    errno = e;
+    return r;
+}
+static const struct { const char *name; void *fn; } fh_tab_drv[] = { {"ioctl", h_ioctl}, {NULL, NULL} };
+
 static uintptr_t g_rdr_base;
 static int fh_patch_cb(struct dl_phdr_info *info, size_t sz, void *data) {
     (void)sz;
     if (!info->dlpi_name) return 0;
     int is_rdr = strstr(info->dlpi_name, "librdr.so") != NULL;
-    if (!is_rdr && (!strstr(info->dlpi_name, "/guests/") || strstr(info->dlpi_name, "vkshim"))) return 0;
+    int is_drv = strstr(info->dlpi_name, "/vulkan.ad") != NULL;      /* the custom Turnip driver */
+    if (!is_rdr && !is_drv && (!strstr(info->dlpi_name, "/guests/") || strstr(info->dlpi_name, "vkshim"))) return 0;
+    const struct { const char *name; void *fn; } *tab = is_drv ? fh_tab_drv : fh_tab;
     uintptr_t base = info->dlpi_addr;
     if (is_rdr) g_rdr_base = base;
     const ElfW(Dyn) *dyn = NULL;
@@ -1163,12 +1193,12 @@ static int fh_patch_cb(struct dl_phdr_info *info, size_t sz, void *data) {
             uint32_t type = ELF64_R_TYPE(r[i].r_info), sym = ELF64_R_SYM(r[i].r_info);
             if (!sym || (type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_GLOB_DAT)) continue;
             const char *nm = (const char *)strtab + ((const ElfW(Sym) *)symtab)[sym].st_name;
-            for (int k = 0; fh_tab[k].name; k++) {
-                if (strcmp(nm, fh_tab[k].name)) continue;
+            for (int k = 0; tab[k].name; k++) {
+                if (strcmp(nm, tab[k].name)) continue;
                 void **slot = (void **)(base + r[i].r_offset);
                 uintptr_t pg = (uintptr_t)slot & ~(uintptr_t)4095;
-                if (*slot == fh_tab[k].fn) continue;
-                if (mprotect((void *)pg, 4096, PROT_READ | PROT_WRITE) == 0) { *slot = fh_tab[k].fn; (*count)++; }
+                if (*slot == tab[k].fn) continue;
+                if (mprotect((void *)pg, 4096, PROT_READ | PROT_WRITE) == 0) { *slot = tab[k].fn; (*count)++; if (is_drv) GLOG("file hooks: ioctl hooked in the driver (%s)", info->dlpi_name); }
             }
         }
     }
