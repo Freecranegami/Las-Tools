@@ -437,6 +437,26 @@ class MainActivity : Activity() {
                    else "Focus guard OFF: the game is told when it loses focus. Applies the next time the game starts."
     }
 
+    private fun toggleLight(out: TextView) {
+        val on = !Tweaks.light(this)
+        Tweaks.setLight(this, on)
+        out.text = if (on) "Light mode ON: diagnostics are off for best performance (Guest log will have little in it). Applies the next time the game starts."
+                   else "Light mode OFF: full diagnostics. Applies the next time the game starts."
+    }
+
+    private fun chooseCas(out: TextView) {
+        val labels = Tweaks.casLevels.map { it.label }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("CAS sharpening")
+            .setSingleChoiceItems(labels, Tweaks.casIndex(this)) { d, which ->
+                Tweaks.setCas(this, which)
+                out.text = "CAS: ${labels[which]}. Applies the next time the game starts. " +
+                    "If the screen goes black, set it back to Off."
+                d.dismiss()
+            }
+            .show()
+    }
+
     private fun chooseCpu(out: TextView) {
         val labels = GpuSpoof.cpus.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
@@ -505,6 +525,9 @@ class MainActivity : Activity() {
             addView(row(
                 btn("Drivers") { chooseDriver(out) },
                 btn("Focus guard on/off") { toggleFocusGuard(out) }))
+            addView(row(
+                btn("Light mode on/off") { toggleLight(out) },
+                btn("CAS sharpening") { chooseCas(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))

@@ -74,6 +74,7 @@ object GuestRuntime {
         if (!apk.exists()) throw IllegalStateException("game not imported: $pkg")
 
         GpuSpoof.apply(app)
+        Tweaks.apply(app)
         Log.i(TAG, "launch step 2 (real): custom driver")
         Util.ensureShim(app, libDir)
         val p = Util.paths(app, true)

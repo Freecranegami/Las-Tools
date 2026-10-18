@@ -60,7 +60,7 @@ class HostApp : Application() {
         super.onCreate()
         instance = this
         if (inGuestProcess()) {
-            GuestLogFile.start(this)
+            if (!Tweaks.light(this)) GuestLogFile.start(this)   // light mode: no log capture to a file
             HiddenApi.exemptAll()
             if (Build.VERSION.SDK_INT >= 29) registerActivityLifecycleCallbacks(GuestSwap)
         }

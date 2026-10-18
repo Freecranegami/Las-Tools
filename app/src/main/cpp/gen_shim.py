@@ -49,6 +49,8 @@ def wrappable(n):
 COUNTED = {"vkQueuePresentKHR": 1, "vkQueueSubmit": 2, "vkQueueSubmit2": 2, "vkQueueSubmit2KHR": 2,
            "vkAcquireNextImageKHR": 3, "vkAcquireNextImage2KHR": 3}
 PROC = ("vkGetInstanceProcAddr", "vkGetDeviceProcAddr")
+# commands that cas.c needs to see (swapchain create/present/destroy, and the queue/device handles it has to know about)
+CAS_HOOK = ("vkCreateSwapchainKHR", "vkQueuePresentKHR", "vkDestroySwapchainKHR", "vkGetDeviceQueue", "vkGetDeviceQueue2", "vkCreateDevice")
 # void commands that return the GPU identity: rewritten from the LAS_GPU_* environment (set by the app)
 SPOOF = {"vkGetPhysicalDeviceProperties": 0, "vkGetPhysicalDeviceProperties2": 1, "vkGetPhysicalDeviceProperties2KHR": 1}
 wrapped = [n for n in names if wrappable(n) and n not in PROC]
@@ -126,7 +128,10 @@ static void *vkshim_logger(void *a) {
 """
 lines.append("#include <stdio.h>")
 lines.append(logger_c)
+lines.append("static int vkshim_light = -1;")
 lines.append("static void vkshim_after(int idx, int res, int kind) {")
+lines.append("    if (vkshim_light < 0) { const char *l = getenv(\"LAS_LIGHT\"); vkshim_light = (l && *l == '1'); }")
+lines.append("    if (vkshim_light) return;                 /* light mode: no counting, no logging */")
 lines.append("    if (kind) {")
 lines.append("        unsigned c = __sync_add_and_fetch(&vkshim_cnt[kind], 1);")
 lines.append("        if (c == 1 && !__sync_lock_test_and_set(&vkshim_logger_on, 1)) {")
@@ -180,11 +185,49 @@ typedef void (*vkshim_f2v)(long, long);
 """
 lines.append(spoof_c)
 lines.append("typedef long (*vkshim_f8)(long, long, long, long, long, long, long, long);")
+lines.append("typedef long (*vkshim_f2)(long, long);")
+lines.append("typedef void (*vkshim_f4v)(long, long, long, long);")
+lines.append("extern long vkshim_cas_create(long, long, long, long, vkshim_f8);")
+lines.append("extern long vkshim_cas_present(long, long, vkshim_f2);")
+lines.append("extern void vkshim_cas_destroy(long, long, long, vkshim_f4v);")
+lines.append("extern void vkshim_cas_getqueue(long, long, long);")
+lines.append("extern void vkshim_cas_getqueue2(long, long, long);")
+lines.append("extern void vkshim_cas_device(long, long);")
 lines.append("typedef void *(*vkshim_gpa)(long, const char *);")
 lines.append("")
 idx = {n: i for i, n in enumerate(names)}
 for i, n in enumerate(names):
-    if n in wrapped_set:
+    if n in CAS_HOOK:
+        e = '__attribute__((visibility("default")))'
+        if n == "vkCreateSwapchainKHR":
+            lines.append("%s long %s(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {" % (e, n))
+            lines.append("    long r = vkshim_cas_create(a0, a1, a2, a3, (vkshim_f8)vkshim_table[%d]);" % i)
+            lines.append("    vkshim_after(%d, (int)r, 0);" % i)
+            lines.append("    return r;")
+        elif n == "vkQueuePresentKHR":
+            lines.append("%s long %s(long a0, long a1) {" % (e, n))
+            lines.append("    long r = vkshim_cas_present(a0, a1, (vkshim_f2)vkshim_table[%d]);" % i)
+            lines.append("    vkshim_after(%d, (int)r, 1);" % i)
+            lines.append("    return r;")
+        elif n == "vkDestroySwapchainKHR":
+            lines.append("%s void %s(long a0, long a1, long a2) {" % (e, n))
+            lines.append("    vkshim_cas_destroy(a0, a1, a2, (vkshim_f4v)vkshim_table[%d]);" % i)
+        elif n == "vkGetDeviceQueue":
+            lines.append("%s void %s(long a0, long a1, long a2, long a3) {" % (e, n))
+            lines.append("    ((vkshim_f4v)vkshim_table[%d])(a0, a1, a2, a3);" % i)
+            lines.append("    vkshim_cas_getqueue(a0, (long)(unsigned)a1, a3);")
+        elif n == "vkGetDeviceQueue2":
+            lines.append("%s void %s(long a0, long a1, long a2) {" % (e, n))
+            lines.append("    ((vkshim_f4v)vkshim_table[%d])(a0, a1, a2, 0);" % i)
+            lines.append("    vkshim_cas_getqueue2(a0, a1, a2);")
+        elif n == "vkCreateDevice":
+            lines.append("%s long %s(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {" % (e, n))
+            lines.append("    long r = ((vkshim_f8)vkshim_table[%d])(a0, a1, a2, a3, a4, a5, a6, a7);" % i)
+            lines.append("    if (r == 0 && a3) vkshim_cas_device(a0, *(long *)a3);")
+            lines.append("    vkshim_after(%d, (int)r, 0);" % i)
+            lines.append("    return r;")
+        lines.append("}")
+    elif n in wrapped_set:
         lines.append("__attribute__((visibility(\"default\"))) long %s(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {" % n)
         lines.append("    long r = ((vkshim_f8)vkshim_table[%d])(a0, a1, a2, a3, a4, a5, a6, a7);" % i)
         lines.append("    vkshim_after(%d, (int)r, %d);" % (i, COUNTED.get(n, 0)))
@@ -209,7 +252,7 @@ lines.append("__attribute__((visibility(\"default\"))) void *vkGetInstanceProcAd
 lines.append("__attribute__((visibility(\"default\"))) void *vkGetDeviceProcAddr(long, const char *);")
 lines.append("static void *const vkshim_wrap[VKSHIM_COUNT] = {")
 for n in names:
-    lines.append("    %s," % ("(void *)" + n if (n in wrapped_set or n in PROC or n in SPOOF) else "0"))
+    lines.append("    %s," % ("(void *)" + n if (n in wrapped_set or n in PROC or n in SPOOF or n in CAS_HOOK) else "0"))
 lines.append("};")
 lines.append("static void *vkshim_lookup(const char *n, void *real) {")
 lines.append("    if (!real || !n) return real;")
@@ -224,6 +267,13 @@ for n in PROC:
         lines.append("    return vkshim_lookup(name, r);")
         lines.append("}")
 lines.append("")
+lines.append("")
+lines.append("static void vkshim_missing(void);")
+lines.append('__attribute__((visibility("default"))) void *vkshim_real_proc(const char *n) {   /* a function of the opened loader, for cas.c */')
+lines.append("    for (int i = 0; i < VKSHIM_COUNT; i++)")
+lines.append("        if (!strcmp(n, vkshim_names[i])) return (vkshim_table[i] && vkshim_table[i] != (void *)vkshim_missing) ? vkshim_table[i] : 0;")
+lines.append("    return 0;")
+lines.append("}")
 lines.append("static void vkshim_missing(void) {")
 lines.append('    __android_log_print(ANDROID_LOG_ERROR, "vkshim", "call to a Vulkan function the driver does not provide");')
 lines.append("    abort();")

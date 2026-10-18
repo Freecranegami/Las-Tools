@@ -29,5 +29,6 @@ execute_process(
 if(NOT GEN_RES EQUAL 0)
     message(FATAL_ERROR "Vulkan shim generation failed: ${GEN_ERR} ${GEN_OUT}")
 endif()
-add_library(vkshim SHARED "${SHIM_C}")
+add_library(vkshim SHARED "${SHIM_C}" cas.c)
+target_compile_definitions(vkshim PRIVATE VK_NO_PROTOTYPES)
 target_link_libraries(vkshim dl log)

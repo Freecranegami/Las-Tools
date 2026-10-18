@@ -924,6 +924,7 @@ Java_com_freecrane_adrenotest_Native_snapshot(JNIEnv *env, jobject thiz, jstring
 #ifndef R_AARCH64_GLOB_DAT
 #define R_AARCH64_GLOB_DAT 1025
 #endif
+static int g_light = 0;                           /* LAS_LIGHT=1: no diagnostics */
 #define FH_SEEN 2048
 static volatile uint32_t g_seen[FH_SEEN];
 static volatile int g_fail_logged = 0, g_ok_logged = 0;
@@ -967,6 +968,7 @@ static void oring_add(const char *fn, const char *name, long rv) {
     g_oring[i].rv = rv; g_oring[i].fn = fn;
 }
 static void fh_note(const char *fn, const char *p, int failed, int e, long rv) {
+    if (g_light) return;
     if (p && !failed && strchr(p, '/') && !fh_boring(p) && strcmp(fn, "access") && strcmp(fn, "stat") && strcmp(fn, "lstat") && strcmp(fn, "fstatat"))
         oring_add(fn, p, rv);
     if (!p || !strchr(p, '/')) return;   /* shader-name lookups and the like are not paths */
@@ -1056,6 +1058,7 @@ static DIR *h_opendir(const char *p) { RD(p, 0); DIR *r = opendir(p); int e = er
 static volatile int g_aam_logged = 0;
 static AAsset *h_aam_open(AAssetManager *m, const char *fn, int mode) {
     AAsset *r = AAssetManager_open(m, fn, mode);
+    if (g_light) return r;
     if (fn && r) oring_add("asset", fn, (long)r);
     if (fn && g_aam_logged < 400) { g_aam_logged++; GLOG("native-asset open(%.200s) -> %p", fn, (void *)r); }
     return r;
@@ -1163,7 +1166,8 @@ static int fh_patch_cb(struct dl_phdr_info *info, size_t sz, void *data) {
     (void)sz;
     if (!info->dlpi_name) return 0;
     int is_rdr = strstr(info->dlpi_name, "librdr.so") != NULL;
-    int is_drv = strstr(info->dlpi_name, "/files/driver/") != NULL || strstr(info->dlpi_name, "/files/drivers/") != NULL;      /* the custom Turnip driver */
+    int is_drv = strstr(info->dlpi_name, "/files/driver/") != NULL || strstr(info->dlpi_name, "/files/drivers/") != NULL;      /* the custom Vulkan driver */
+    if (is_drv && g_light) return 0;                 /* light mode: no ioctl watching */
     if (!is_rdr && !is_drv && (!strstr(info->dlpi_name, "/guests/") || strstr(info->dlpi_name, "vkshim"))) return 0;
     const struct { const char *name; void *fn; } *tab = is_drv ? fh_tab_drv : fh_tab;
     uintptr_t base = info->dlpi_addr;
@@ -1208,7 +1212,7 @@ static int fh_patch_cb(struct dl_phdr_info *info, size_t sz, void *data) {
 static void *fh_thread(void *arg) {
     (void)arg;
     int found = 0;
-    for (int i = 0; i < 6000; i++) {            /* ~2 min: the game's libraries load at different times */
+    for (int i = 0; i < 3000; i++) {            /* ~3 min: the game's libraries load at different times */
         int count = 0;
         dl_iterate_phdr(fh_patch_cb, &count);
         if (count) GLOG("file hooks: patched %d imports in the game's libraries", count);
@@ -1262,7 +1266,9 @@ Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz,
     if (g_ext[0]) { char t[500]; snprintf(t, sizeof t, "%s/data/x", g_ext); fh_mkdirs(t); snprintf(t, sizeof t, "%s/obb/x", g_ext); fh_mkdirs(t); }
     { const char *fk = getenv("LAS_FAKE_DIR"); if (fk) strncpy(g_fake, fk, sizeof g_fake - 1); }
     GLOG("file hooks: Android/data and Android/obb of %s -> %s; fake dir %s", g_pkg, g_ext, g_fake);
-    errpipe_install();
+    { const char *lt = getenv("LAS_LIGHT"); g_light = (lt && *lt == '1'); }
+    if (!g_light) errpipe_install();
+    GLOG("file hooks: light mode %s", g_light ? "ON (diagnostics off)" : "off");
     pthread_t t;
     if (pthread_create(&t, NULL, fh_thread, NULL) == 0) pthread_detach(t);
 }
