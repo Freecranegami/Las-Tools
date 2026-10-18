@@ -1189,6 +1189,39 @@ static void *fh_thread(void *arg) {
     return NULL;
 }
 
+
+/* ---------- Build 63: the game's and the driver's own stderr/stdout go to the log ----------
+ * Mesa/Turnip prints why a device was lost (and the game prints its own messages) to stderr, which Android
+ * normally throws away. Both descriptors are pointed at a non-blocking pipe (a full pipe never stalls the
+ * game) and a thread forwards the lines.
+ */
+static int g_errpipe[2] = {-1, -1};
+static void *errpipe_thread(void *arg) {
+    (void)arg;
+    char buf[4096], line[600]; size_t ll = 0; int logged = 0;
+    for (;;) {
+        ssize_t n = read(g_errpipe[0], buf, sizeof buf);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(20000); continue; }
+        if (n <= 0) return NULL;
+        for (ssize_t i = 0; i < n; i++) {
+            char c = buf[i];
+            if (c == '\n' || ll >= sizeof line - 1) {
+                line[ll] = 0; ll = 0;
+                if (line[0] && logged < 400 && fh_first(line)) { logged++; GLOG("native-stderr %.500s", line); }
+            } else line[ll++] = c;
+        }
+    }
+}
+static void errpipe_install(void) {
+    static int done = 0;
+    if (done) return; done = 1;
+    if (pipe(g_errpipe) != 0) return;
+    fcntl(g_errpipe[1], F_SETFL, O_NONBLOCK);
+    dup2(g_errpipe[1], 1); dup2(g_errpipe[1], 2);
+    pthread_t t;
+    if (pthread_create(&t, NULL, errpipe_thread, NULL) == 0) pthread_detach(t);
+}
+
 JNIEXPORT void JNICALL
 Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz, jstring jpkg, jstring jext) {
     (void)thiz;
@@ -1199,6 +1232,7 @@ Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz,
     if (g_ext[0]) { char t[500]; snprintf(t, sizeof t, "%s/data/x", g_ext); fh_mkdirs(t); snprintf(t, sizeof t, "%s/obb/x", g_ext); fh_mkdirs(t); }
     { const char *fk = getenv("LAS_FAKE_DIR"); if (fk) strncpy(g_fake, fk, sizeof g_fake - 1); }
     GLOG("file hooks: Android/data and Android/obb of %s -> %s; fake dir %s", g_pkg, g_ext, g_fake);
+    errpipe_install();
     pthread_t t;
     if (pthread_create(&t, NULL, fh_thread, NULL) == 0) pthread_detach(t);
 }

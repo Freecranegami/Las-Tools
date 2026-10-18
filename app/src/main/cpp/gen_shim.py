@@ -92,6 +92,18 @@ static unsigned vkshim_kb(const char *file, const char *key) {   /* "Key:   1234
     while (fgets(l, sizeof l, f)) if (!strncmp(l, key, strlen(key))) { v = (unsigned)strtoul(l + strlen(key), NULL, 10); break; }
     fclose(f); return v;
 }
+static void vkshim_kgsl(const char *why) {   /* GPU state from sysfs, when the app is allowed to read it */
+    static const char *const nodes[] = { "reset_count", "gpuclk", "gpu_busy_percentage", "temp", "thermal_pwrlevel", "ft_policy", "ft_long_ib_detect", "ft_pagefault_policy", NULL };
+    char out[500]; int k = 0;
+    for (int i = 0; nodes[i] && k < 440; i++) {
+        char path[120], v[48]; snprintf(path, sizeof path, "/sys/class/kgsl/kgsl-3d0/%s", nodes[i]);
+        FILE *f = fopen(path, "r"); v[0] = 0;
+        if (f) { if (!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); }
+        for (char *c = v; *c; c++) if (*c == '\n') *c = 0;
+        k += snprintf(out + k, sizeof out - k, " %s=%s", nodes[i], f ? v : "unreadable");
+    }
+    __android_log_print(ANDROID_LOG_INFO, "GuestHost", "vkshim: kgsl (%s):%s", why, out);
+}
 static void *vkshim_logger(void *a) {
     unsigned lp = 0, ls = 0, la = 0, le = 0;
     for (unsigned tick = 1; ; tick++) {
@@ -105,6 +117,8 @@ static void *vkshim_logger(void *a) {
         if (bad || tick <= 12 || tick % 6 == 0)
             __android_log_print(ANDROID_LOG_INFO, "GuestHost", "vkshim: mem: process %u MB, phone available %u MB, swap free %u MB",
                 vkshim_kb("/proc/self/status", "VmRSS:") / 1024, vkshim_kb("/proc/meminfo", "MemAvailable:") / 1024, vkshim_kb("/proc/meminfo", "SwapFree:") / 1024);
+        if (tick == 3) vkshim_kgsl("healthy baseline");
+        if (e != le && le == 0) vkshim_kgsl("first errors");
         lp = p; ls = s; la = q; le = e;
     }
     return NULL;

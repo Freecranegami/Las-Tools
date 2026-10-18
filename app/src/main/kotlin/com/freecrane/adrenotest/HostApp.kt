@@ -68,6 +68,8 @@ class HostApp : Application() {
 }
 
 private object GuestSwap : Application.ActivityLifecycleCallbacks {
+    private val watched = java.util.Collections.newSetFromMap(java.util.WeakHashMap<Activity, Boolean>())
+
     // API 29+: called after the activity is attached and before its onCreate.
     override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
         GuestContext.install(activity)
@@ -84,7 +86,22 @@ private object GuestSwap : Application.ActivityLifecycleCallbacks {
     // Lifecycle events are logged so a black screen can be matched against pauses and surface loss.
     private fun life(what: String, a: Activity) { if (a.javaClass.classLoader is GuestLoader) Log.i("GuestHost", "lifecycle: $what ${a.javaClass.simpleName}") }
     override fun onActivityStarted(activity: Activity) = life("started", activity)
-    override fun onActivityResumed(activity: Activity) = life("resumed", activity)
+    override fun onActivityResumed(activity: Activity) {
+        life("resumed", activity)
+        if (activity.javaClass.classLoader !is GuestLoader || watched.contains(activity)) return
+        watched.add(activity)
+        try {
+            activity.window.decorView.viewTreeObserver.addOnWindowFocusChangeListener { has ->
+                Log.i("GuestHost", "lifecycle: window focus=$has")
+            }
+            activity.registerComponentCallbacks(object : android.content.ComponentCallbacks {
+                override fun onConfigurationChanged(c: android.content.res.Configuration) {
+                    Log.i("GuestHost", "lifecycle: config changed: orientation=${c.orientation} ${c.screenWidthDp}x${c.screenHeightDp}dp density=${c.densityDpi} night=${c.uiMode and 0x30}")
+                }
+                override fun onLowMemory() {}
+            })
+        } catch (t: Throwable) { Log.w("GuestHost", "focus watch failed: $t") }
+    }
     override fun onActivityPaused(activity: Activity) = life("PAUSED", activity)
     override fun onActivityStopped(activity: Activity) = life("STOPPED", activity)
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
