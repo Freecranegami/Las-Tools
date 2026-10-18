@@ -32,7 +32,7 @@ object GuestLog {
     )
 
     // what the game asks about the device: always shown first, never cut
-    private val identityTokens = listOf("native-hw", "native-prop", "native-gl", "vkshim: GPU", "vkshim: driver", "GPU spoof", "file hooks", "native-model")
+    private val identityTokens = listOf("native-hw", "native-prop", "native-gl", "vkshim: GPU", "vkshim: driver", "GPU spoof", "driver in use", "file hooks", "native-model")
 
     private val important = listOf(
         " E ", " F ", "GuestHost", "GuestGame", "Unity", "JNI", "Abort", "signal", "vkshim",

@@ -61,6 +61,7 @@ object Guest {
 class MainActivity : Activity() {
 
     private val pickRequest = 1001
+    private val driverRequest = 1002
 
     private var surface: Surface? = null
     private lateinit var outView: TextView
@@ -162,6 +163,17 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == driverRequest) {
+            val u = if (resultCode == RESULT_OK) data?.data else null
+            if (u != null) {
+                outView.text = "Importing the driver..."
+                Thread {
+                    val msg = Drivers.import(this, u)
+                    runOnUiThread { outView.text = msg }
+                }.start()
+            }
+            return
+        }
         if (requestCode != pickRequest || resultCode != RESULT_OK || data == null) return
         val uris = ArrayList<Uri>()
         val clip = data.clipData
@@ -387,6 +399,37 @@ class MainActivity : Activity() {
             .show()
     }
 
+    // ---------- Vulkan driver choice ----------
+
+    private fun chooseDriver(out: TextView) {
+        val drivers = Drivers.list(this)
+        if (drivers.isEmpty()) { out.text = "No driver found."; return }
+        var sel = drivers.indexOfFirst { it.id == Drivers.selectedId(this) }.coerceAtLeast(0)
+        val labels = drivers.map { it.label }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Vulkan driver for the game")
+            .setSingleChoiceItems(labels, sel) { _, which -> sel = which }
+            .setPositiveButton("Use") { _, _ ->
+                val d = drivers[sel]
+                Drivers.select(this, d.id)
+                out.text = "Driver: ${d.label}\nApplies the next time the game starts. " +
+                    "If the game then fails to start, pick the bundled driver again."
+            }
+            .setNegativeButton("Import...") { _, _ ->
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                }
+                startActivityForResult(i, driverRequest)
+            }
+            .setNeutralButton("Delete") { _, _ ->
+                val d = drivers[sel]
+                out.text = if (d.bundled) "The bundled driver can't be deleted."
+                           else if (Drivers.delete(this, d.id)) "Deleted ${d.name}." else "Couldn't delete ${d.name}."
+            }
+            .show()
+    }
+
     private fun toggleFocusGuard(out: TextView) {
         val on = !FocusGuard.enabled(this)
         FocusGuard.set(this, on)
@@ -460,6 +503,7 @@ class MainActivity : Activity() {
                 btn("CPU spoof") { chooseCpu(out) },
                 btn("Device spoof") { chooseDevice(out) }))
             addView(row(
+                btn("Drivers") { chooseDriver(out) },
                 btn("Focus guard on/off") { toggleFocusGuard(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },

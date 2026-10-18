@@ -32,8 +32,9 @@ object Util {
         val tmp = File(ctx.codeCacheDir, "adreno").apply { mkdirs() }
         val hook = ctx.applicationInfo.nativeLibraryDir
         return if (custom) {
-            val (dir, name) = installDriver(ctx)
-            listOf("$tmp/", "$hook/", "$dir/", name)
+            installDriver(ctx)                       // keeps the bundled copy in place
+            val d = Drivers.active(ctx)
+            listOf("$tmp/", "$hook/", "${d.dir}/", d.library)
         } else {
             listOf("$tmp/", "$hook/", "", "")
         }

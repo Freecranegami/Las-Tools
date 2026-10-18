@@ -1163,7 +1163,7 @@ static int fh_patch_cb(struct dl_phdr_info *info, size_t sz, void *data) {
     (void)sz;
     if (!info->dlpi_name) return 0;
     int is_rdr = strstr(info->dlpi_name, "librdr.so") != NULL;
-    int is_drv = strstr(info->dlpi_name, "/vulkan.ad") != NULL;      /* the custom Turnip driver */
+    int is_drv = strstr(info->dlpi_name, "/files/driver/") != NULL || strstr(info->dlpi_name, "/files/drivers/") != NULL;      /* the custom Turnip driver */
     if (!is_rdr && !is_drv && (!strstr(info->dlpi_name, "/guests/") || strstr(info->dlpi_name, "vkshim"))) return 0;
     const struct { const char *name; void *fn; } *tab = is_drv ? fh_tab_drv : fh_tab;
     uintptr_t base = info->dlpi_addr;
