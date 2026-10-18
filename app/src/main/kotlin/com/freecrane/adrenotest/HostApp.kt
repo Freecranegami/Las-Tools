@@ -46,6 +46,16 @@ class HostApp : Application() {
         return super.bindService(service, flags, executor, conn)
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (inGuestProcess()) Log.i("GuestHost", "lifecycle: onTrimMemory level=$level")
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        if (inGuestProcess()) Log.i("GuestHost", "lifecycle: onLowMemory")
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -71,12 +81,14 @@ private object GuestSwap : Application.ActivityLifecycleCallbacks {
         }
     }
 
-    override fun onActivityStarted(activity: Activity) {}
-    override fun onActivityResumed(activity: Activity) {}
-    override fun onActivityPaused(activity: Activity) {}
-    override fun onActivityStopped(activity: Activity) {}
+    // Lifecycle events are logged so a black screen can be matched against pauses and surface loss.
+    private fun life(what: String, a: Activity) { if (a.javaClass.classLoader is GuestLoader) Log.i("GuestHost", "lifecycle: $what ${a.javaClass.simpleName}") }
+    override fun onActivityStarted(activity: Activity) = life("started", activity)
+    override fun onActivityResumed(activity: Activity) = life("resumed", activity)
+    override fun onActivityPaused(activity: Activity) = life("PAUSED", activity)
+    override fun onActivityStopped(activity: Activity) = life("STOPPED", activity)
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-    override fun onActivityDestroyed(activity: Activity) {}
+    override fun onActivityDestroyed(activity: Activity) = life("DESTROYED", activity)
 }
 
 // The phone's log buffer is small, so by the time the log is read after a long run the launch lines

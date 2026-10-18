@@ -85,16 +85,33 @@ lines.append("")
 lines.append("static volatile unsigned vkshim_cnt[4];   /* present, submit, acquire */")
 lines.append("static volatile int vkshim_errs;")
 lines.append("static volatile int vkshim_logger_on;")
-lines.append("static void *vkshim_logger(void *a) {")
-lines.append("    unsigned lp = 0, ls = 0, la = 0;")
-lines.append("    for (int i = 0; i < 80; i++) {")
-lines.append("        sleep(5);")
-lines.append("        unsigned p = vkshim_cnt[1], s = vkshim_cnt[2], q = vkshim_cnt[3];")
-lines.append('        __android_log_print(ANDROID_LOG_INFO, "GuestHost", "vkshim: last 5 s: presents=%u submits=%u acquires=%u (totals %u/%u/%u)", p - lp, s - ls, q - la, p, s, q);')
-lines.append("        lp = p; ls = s; la = q;")
-lines.append("    }")
-lines.append("    return NULL;")
-lines.append("}")
+logger_c = r"""
+static unsigned vkshim_kb(const char *file, const char *key) {   /* "Key:   1234 kB" -> 1234 */
+    FILE *f = fopen(file, "r"); char l[256]; unsigned v = 0;
+    if (!f) return 0;
+    while (fgets(l, sizeof l, f)) if (!strncmp(l, key, strlen(key))) { v = (unsigned)strtoul(l + strlen(key), NULL, 10); break; }
+    fclose(f); return v;
+}
+static void *vkshim_logger(void *a) {
+    unsigned lp = 0, ls = 0, la = 0, le = 0;
+    for (unsigned tick = 1; ; tick++) {
+        sleep(5);
+        unsigned p = vkshim_cnt[1], s = vkshim_cnt[2], q = vkshim_cnt[3], e = (unsigned)vkshim_errs;
+        /* quiet when healthy: every 5 s for the first minute, then every 30 s; always when frames stop or errors appear */
+        int bad = (p == lp) || (e != le);
+        if (bad || tick <= 12 || tick % 6 == 0)
+            __android_log_print(ANDROID_LOG_INFO, "GuestHost", "vkshim: last 5 s: presents=%u submits=%u acquires=%u errors=%u (totals %u/%u/%u)%s",
+                p - lp, s - ls, q - la, e - le, p, s, q, p == lp ? "  NO FRAMES" : "");
+        if (bad || tick <= 12 || tick % 6 == 0)
+            __android_log_print(ANDROID_LOG_INFO, "GuestHost", "vkshim: mem: process %u MB, phone available %u MB, swap free %u MB",
+                vkshim_kb("/proc/self/status", "VmRSS:") / 1024, vkshim_kb("/proc/meminfo", "MemAvailable:") / 1024, vkshim_kb("/proc/meminfo", "SwapFree:") / 1024);
+        lp = p; ls = s; la = q; le = e;
+    }
+    return NULL;
+}
+"""
+lines.append("#include <stdio.h>")
+lines.append(logger_c)
 lines.append("static void vkshim_after(int idx, int res, int kind) {")
 lines.append("    if (kind) {")
 lines.append("        unsigned c = __sync_add_and_fetch(&vkshim_cnt[kind], 1);")
@@ -103,9 +120,9 @@ lines.append("            pthread_t t; if (pthread_create(&t, NULL, vkshim_logge
 lines.append("        }")
 lines.append("        if (c <= 3) __android_log_print(ANDROID_LOG_INFO, \"GuestHost\", \"vkshim: %s call #%u -> %d\", vkshim_names[idx], c, res);")
 lines.append("    }")
-lines.append("    if (res < 0 && vkshim_errs < 200) {")
-lines.append("        vkshim_errs++;")
-lines.append('        __android_log_print(ANDROID_LOG_ERROR, "vkshim", "%s returned %d", vkshim_names[idx], res);')
+lines.append("    if (res < 0) {")
+lines.append("        unsigned n = __sync_add_and_fetch(&vkshim_errs, 1);")
+lines.append('        if (n <= 60) __android_log_print(ANDROID_LOG_ERROR, "vkshim", "error #%u: %s returned %d", n, vkshim_names[idx], res);')
 lines.append("    }")
 lines.append("}")
 spoof_c = r"""
