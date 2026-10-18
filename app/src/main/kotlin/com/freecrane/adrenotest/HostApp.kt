@@ -73,6 +73,7 @@ private object GuestSwap : Application.ActivityLifecycleCallbacks {
     // API 29+: called after the activity is attached and before its onCreate.
     override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
         GuestContext.install(activity)
+        if (activity.javaClass.classLoader is GuestLoader) FocusGuard.install(activity)
         if (activity.javaClass.classLoader is GuestLoader) { GuestInspect.dump(activity, false); GuestInspect.probePlay(activity); GuestInspect.reflectPlay(activity); GuestInspect.packReport(activity) }
     }
 
@@ -136,5 +137,47 @@ object GuestLogFile {
                 Log.w("GuestHost", "log capture failed: $t")
             }
         }.also { it.isDaemon = true; it.name = "las-logfile" }.start()
+    }
+}
+
+
+// When the control centre or notification shade takes window focus, the game goes into its pause path and, on this
+// phone with the custom driver, the GPU context is then invalidated by the kernel (kgsl EPROTO) and the screen
+// stays black. With this guard the game is not told that it lost focus (it is still told when it gets it back),
+// so it keeps rendering behind the shade. Real pauses (Home, screen off) still arrive through onPause.
+object FocusGuard {
+    private const val PREFS = "las"
+    private const val KEY = "ignore_focus_loss"
+
+    fun enabled(ctx: android.content.Context): Boolean =
+        ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).getBoolean(KEY, true)
+
+    fun set(ctx: android.content.Context, on: Boolean) {
+        ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit().putBoolean(KEY, on).commit()
+    }
+
+    fun install(a: Activity) {
+        try {
+            if (!enabled(a.applicationContext ?: a)) { Log.i("GuestHost", "focus guard: off"); return }
+            val w = a.window
+            val d = w.callback ?: return
+            if (d is Guard) return
+            w.callback = Guard(d)
+            Log.i("GuestHost", "focus guard: on (focus loss is not passed to the game)")
+        } catch (t: Throwable) { Log.w("GuestHost", "focus guard failed: $t") }
+    }
+
+    private class Guard(private val d: android.view.Window.Callback) : android.view.Window.Callback by d {
+        private var swallowed = 0
+        override fun onWindowFocusChanged(hasFocus: Boolean) {
+            if (!hasFocus) {
+                if (swallowed++ < 6) Log.i("GuestHost", "focus guard: focus loss not passed to the game")
+                return
+            }
+            d.onWindowFocusChanged(true)
+        }
+        override fun onPointerCaptureChanged(hasCapture: Boolean) = d.onPointerCaptureChanged(hasCapture)
+        override fun onProvideKeyboardShortcuts(data: MutableList<android.view.KeyboardShortcutGroup>?, menu: android.view.Menu?, deviceId: Int) =
+            d.onProvideKeyboardShortcuts(data, menu, deviceId)
     }
 }

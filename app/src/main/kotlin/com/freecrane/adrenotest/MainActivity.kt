@@ -387,6 +387,13 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun toggleFocusGuard(out: TextView) {
+        val on = !FocusGuard.enabled(this)
+        FocusGuard.set(this, on)
+        out.text = if (on) "Focus guard ON: the game keeps running (and is not told it lost focus) when the control centre or notification shade opens. Applies the next time the game starts."
+                   else "Focus guard OFF: the game is told when it loses focus. Applies the next time the game starts."
+    }
+
     private fun chooseCpu(out: TextView) {
         val labels = GpuSpoof.cpus.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
@@ -447,10 +454,13 @@ class MainActivity : Activity() {
             addView(row(
                 btn("Show log") { showLog() },
                 btn("Copy log") { copyLog() },
-                btn("Guest log") { GuestLog.copy(this@MainActivity, out) },
+                btn("Guest log") { GuestLog.copy(this@MainActivity, out) }))
+            addView(row(
                 btn("GPU spoof") { chooseGpu(out) },
                 btn("CPU spoof") { chooseCpu(out) },
                 btn("Device spoof") { chooseDevice(out) }))
+            addView(row(
+                btn("Focus guard on/off") { toggleFocusGuard(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))
