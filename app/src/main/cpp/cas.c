@@ -185,7 +185,7 @@ static uint32_t pick_memtype(VkDevice dev, uint32_t bits) {
     return 0;
 }
 
-static void cas_setup(Cas *c, VkQueue queue) {
+static void cas_setup_impl(Cas *c, VkQueue queue) {
     VkDevice d = c->dev;
     uint32_t family;
     if (!queue_family(queue, &family)) { LOGI("cas: off, the present queue's family is unknown"); c->failed = 1; return; }
@@ -340,6 +340,23 @@ static void cas_setup(Cas *c, VkQueue queue) {
     }
     c->ready = 1;
     LOGI("cas: ready: %u images, format %d, %ux%u, strength %.2f", n, (int)c->fmt, c->ext.width, c->ext.height, sharp);
+}
+
+/* The game's present thread has a small stack and creating the pipeline runs the driver's shader compiler,
+ * which needs a lot of it (the first test crashed there with a stack overflow). So setup runs on its own thread. */
+struct setup_arg { Cas *c; VkQueue q; };
+static void *setup_thread(void *p) { struct setup_arg *a = p; cas_setup_impl(a->c, a->q); return NULL; }
+static void cas_setup(Cas *c, VkQueue queue) {
+    struct setup_arg a = { c, queue };
+    pthread_attr_t at; pthread_t t;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 4u << 20);
+    if (pthread_create(&t, &at, setup_thread, &a) != 0) {
+        LOGI("cas: off, couldn't start the setup thread");
+        c->failed = 1; pthread_attr_destroy(&at); return;
+    }
+    pthread_join(t, NULL);
+    pthread_attr_destroy(&at);
 }
 
 /* ---------- entry points called from the generated shim ---------- */
