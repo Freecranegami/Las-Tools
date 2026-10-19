@@ -444,6 +444,49 @@ class MainActivity : Activity() {
                    else "Light mode OFF: full diagnostics. Applies the next time the game starts."
     }
 
+    private fun chooseResolution(out: TextView) {
+        val (sw, sh) = Tweaks.screenSize(this)
+        val pcts = intArrayOf(100, 90, 80, 75, 66, 50)
+        fun sized(p: Int) = Pair((sw * p / 100) / 2 * 2, (sh * p / 100) / 2 * 2)
+        val labels = (pcts.map { p -> val (w, h) = sized(p); if (p == 100) "Native ($sw x $sh)" else "$p% ($w x $h)" } + "Custom...").toTypedArray()
+        val cw = Tweaks.resW(this); val ch = Tweaks.resH(this)
+        val cur = if (cw <= 0) 0 else pcts.indices.firstOrNull { sized(pcts[it]) == Pair(cw, ch) } ?: pcts.size
+        AlertDialog.Builder(this)
+            .setTitle("Game resolution (screen is $sw x $sh)")
+            .setSingleChoiceItems(labels, cur) { d, which ->
+                d.dismiss()
+                if (which < pcts.size) {
+                    val (w, h) = if (pcts[which] == 100) Pair(0, 0) else sized(pcts[which])
+                    Tweaks.setRes(this, w, h)
+                    out.text = (if (w == 0) "Resolution: native." else "Resolution: $w x $h, scaled up to the screen.") +
+                        " Applies the next time the game starts. If the game misbehaves, set it back to Native."
+                } else customResolution(out, sw, sh)
+            }
+            .show()
+    }
+
+    private fun customResolution(out: TextView, sw: Int, sh: Int) {
+        val wBox = android.widget.EditText(this).apply { hint = "width"; inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(Tweaks.resW(this@MainActivity).takeIf { it > 0 }?.toString() ?: "") }
+        val hBox = android.widget.EditText(this).apply { hint = "height"; inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(Tweaks.resH(this@MainActivity).takeIf { it > 0 }?.toString() ?: "") }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 16, 48, 0); addView(wBox); addView(hBox) }
+        AlertDialog.Builder(this)
+            .setTitle("Custom resolution (landscape, e.g. 1280 x 576)")
+            .setView(box)
+            .setPositiveButton("Set") { _, _ ->
+                val w = wBox.text.toString().toIntOrNull() ?: 0
+                val h = hBox.text.toString().toIntOrNull() ?: 0
+                if (w < 320 || h < 180 || w > sw * 2 || h > sh * 2) { out.text = "Not set: width at least 320, height at least 180, and no more than twice the screen." }
+                else {
+                    Tweaks.setRes(this, w, h)
+                    out.text = "Resolution: $w x $h, scaled to the screen. Applies the next time the game starts. If the game misbehaves, set it back to Native."
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun chooseCas(out: TextView) {
         val labels = Tweaks.casLevels.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
@@ -527,7 +570,8 @@ class MainActivity : Activity() {
                 btn("Focus guard on/off") { toggleFocusGuard(out) }))
             addView(row(
                 btn("Light mode on/off") { toggleLight(out) },
-                btn("CAS sharpening") { chooseCas(out) }))
+                btn("CAS sharpening") { chooseCas(out) },
+                btn("Resolution") { chooseResolution(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))

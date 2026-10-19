@@ -23,6 +23,30 @@ object Tweaks {
     fun casIndex(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("cas_level", 0).coerceIn(0, casLevels.size - 1)
     fun setCas(ctx: Context, i: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("cas_level", i).commit() }
 
+    // Custom resolution: the game window is given a fixed size (WindowManager FLAG_SCALED) and the system scales it
+    // up to the screen. 0x0 = the screen's own size.
+    fun resW(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("res_w", 0)
+    fun resH(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("res_h", 0)
+    fun setRes(ctx: Context, w: Int, h: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("res_w", w).putInt("res_h", h).commit() }
+
+    // The screen size in landscape order (the game runs in landscape).
+    fun screenSize(ctx: Context): Pair<Int, Int> {
+        val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+        val b = wm.maximumWindowMetrics.bounds
+        return Pair(maxOf(b.width(), b.height()), minOf(b.width(), b.height()))
+    }
+
+    // Applied to the game's window before its content is set.
+    fun applyResolution(a: android.app.Activity) {
+        try {
+            val w = resW(a); val h = resH(a)
+            if (w <= 0 || h <= 0) return
+            a.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SCALED)
+            a.window.setLayout(w, h)
+            Log.i("GuestHost", "resolution: window fixed at ${w}x$h (screen ${screenSize(a).first}x${screenSize(a).second})")
+        } catch (t: Throwable) { Log.w("GuestHost", "resolution failed: $t") }
+    }
+
     // Called in the game process before the game's libraries load.
     fun apply(ctx: Context) {
         try {
