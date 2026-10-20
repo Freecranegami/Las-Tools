@@ -51,7 +51,7 @@ COUNTED = {"vkQueuePresentKHR": 1, "vkQueueSubmit": 2, "vkQueueSubmit2": 2, "vkQ
 PROC = ("vkGetInstanceProcAddr", "vkGetDeviceProcAddr")
 # commands that cas.c needs to see (swapchain create/present/destroy, and the queue/device handles it has to know about)
 CAS_HOOK = ("vkCreateSwapchainKHR", "vkQueuePresentKHR", "vkDestroySwapchainKHR", "vkGetDeviceQueue", "vkGetDeviceQueue2", "vkCreateDevice",
-            "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceCapabilities2KHR")
+            "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceCapabilities2KHR", "vkGetSwapchainImagesKHR")
 # void commands that return the GPU identity: rewritten from the LAS_GPU_* environment (set by the app)
 SPOOF = {"vkGetPhysicalDeviceProperties": 0, "vkGetPhysicalDeviceProperties2": 1, "vkGetPhysicalDeviceProperties2KHR": 1}
 wrapped = [n for n in names if wrappable(n) and n not in PROC]
@@ -195,6 +195,8 @@ lines.append("extern void vkshim_cas_getqueue(long, long, long);")
 lines.append("extern void vkshim_cas_getqueue2(long, long, long);")
 lines.append("extern void vkshim_cas_device(long, long);")
 lines.append("typedef long (*vkshim_f3)(long, long, long);")
+lines.append("typedef long (*vkshim_f4)(long, long, long, long);")
+lines.append("extern long vkshim_sgsr_images(long, long, long, long, vkshim_f4);")
 lines.append("extern long vkshim_res_caps(long, long, long, vkshim_f3);")
 lines.append("extern long vkshim_res_caps2(long, long, long, vkshim_f3);")
 lines.append("typedef void *(*vkshim_gpa)(long, const char *);")
@@ -224,6 +226,9 @@ for i, n in enumerate(names):
             lines.append("%s void %s(long a0, long a1, long a2) {" % (e, n))
             lines.append("    ((vkshim_f4v)vkshim_table[%d])(a0, a1, a2, 0);" % i)
             lines.append("    vkshim_cas_getqueue2(a0, a1, a2);")
+        elif n == "vkGetSwapchainImagesKHR":
+            lines.append("%s long %s(long a0, long a1, long a2, long a3) {" % (e, n))
+            lines.append("    return vkshim_sgsr_images(a0, a1, a2, a3, (vkshim_f4)vkshim_table[%d]);" % i)
         elif n in ("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceCapabilities2KHR"):
             lines.append("%s long %s(long a0, long a1, long a2) {" % (e, n))
             lines.append("    long r = %s(a0, a1, a2, (vkshim_f3)vkshim_table[%d]);" % ("vkshim_res_caps" if n.endswith("KHR") and "2KHR" not in n else "vkshim_res_caps2", i))

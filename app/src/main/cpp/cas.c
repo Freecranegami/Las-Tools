@@ -20,6 +20,10 @@
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "GuestHost", __VA_ARGS__)
 extern void *vkshim_real_proc(const char *name);
+extern int vkshim_sgsr_create(long, long, long, long, long (*)(long, long, long, long, long, long, long, long), long *);
+extern int vkshim_sgsr_present(long, long, long (*)(long, long), long *);
+extern int vkshim_sgsr_destroy(long, long, long, void (*)(long, long, long, long));
+extern long vkshim_sgsr_images(long, long, long, long, long (*)(long, long, long, long));
 typedef long (*cas_f8)(long, long, long, long, long, long, long, long);
 typedef long (*cas_f2)(long, long);
 typedef void (*cas_f4v)(long, long, long, long);
@@ -140,6 +144,17 @@ static VkPhysicalDevice phys_of(VkDevice d) {
     pthread_mutex_unlock(&g_mu);
     return p;
 }
+/* used by sgsr.c */
+int vkshim_q_family(VkQueue q, uint32_t *family) { return queue_family(q, family); }
+VkPhysicalDevice vkshim_phys_of(VkDevice d) { return phys_of(d); }
+uint32_t vkshim_first_queue_family(int *ok) {
+    uint32_t f = 0; *ok = 0;
+    pthread_mutex_lock(&g_mu);
+    if (g_nq > 0) { f = g_queues[0].family; *ok = 1; }
+    pthread_mutex_unlock(&g_mu);
+    return f;
+}
+
 static Cas *find(VkSwapchainKHR sc) {
     for (int i = 0; i < MAXSC; i++) if (g_cas[i].used && g_cas[i].sc == sc) return &g_cas[i];
     return NULL;
@@ -386,6 +401,7 @@ long vkshim_res_caps2(long phys, long pinfo, long pcaps, cas_f3 real) {
 
 /* ---------- entry points called from the generated shim ---------- */
 long vkshim_cas_create(long device, long pci, long palloc, long psc, cas_f8 real) {
+    { long sr; if (vkshim_sgsr_create(device, pci, palloc, psc, real, &sr)) return sr; }
     if (cas_strength() <= 0.0f || !pci || !psc || !cas_fn_init())
         return real(device, pci, palloc, psc, 0, 0, 0, 0);
     VkSwapchainCreateInfoKHR ci = *(const VkSwapchainCreateInfoKHR *)pci;
@@ -411,6 +427,7 @@ long vkshim_cas_create(long device, long pci, long palloc, long psc, cas_f8 real
 }
 
 long vkshim_cas_present(long queue, long ppi, cas_f2 real) {
+    { long sr; if (vkshim_sgsr_present(queue, ppi, real, &sr)) return sr; }
     const VkPresentInfoKHR *pi = (const VkPresentInfoKHR *)ppi;
     if (pi && pi->swapchainCount == 1 && pi->waitSemaphoreCount <= 8 && cas_fn_init()) {
         Cas *c = find(pi->pSwapchains[0]);
@@ -441,6 +458,7 @@ long vkshim_cas_present(long queue, long ppi, cas_f2 real) {
 }
 
 void vkshim_cas_destroy(long device, long swapchain, long palloc, cas_f4v real) {
+    if (vkshim_sgsr_destroy(device, swapchain, palloc, real)) return;
     Cas *c = swapchain ? find((VkSwapchainKHR)swapchain) : NULL;
     if (c) {
         if (g_fn_state > 0) {

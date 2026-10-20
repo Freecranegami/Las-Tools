@@ -487,6 +487,15 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun toggleSgsr(out: TextView) {
+        val on = !Tweaks.sgsr(this)
+        Tweaks.setSgsr(this, on)
+        val noRes = Tweaks.resW(this) <= 0
+        out.text = if (on) "SGSR upscaling ON: the game renders at the Resolution you set and Snapdragon Game Super Resolution upscales it to the screen. " +
+                    (if (noRes) "Nothing happens until you pick a Resolution below Native. " else "") + "CAS is not used while SGSR works. Applies the next time the game starts. If the screen goes black, turn SGSR off."
+                   else "SGSR upscaling OFF. Applies the next time the game starts."
+    }
+
     private fun chooseCas(out: TextView) {
         val labels = Tweaks.casLevels.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
@@ -572,6 +581,8 @@ class MainActivity : Activity() {
                 btn("Light mode on/off") { toggleLight(out) },
                 btn("CAS sharpening") { chooseCas(out) },
                 btn("Resolution") { chooseResolution(out) }))
+            addView(row(
+                btn("SGSR upscaling on/off") { toggleSgsr(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))
