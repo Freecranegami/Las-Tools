@@ -359,6 +359,31 @@ static void cas_setup(Cas *c, VkQueue queue) {
     pthread_attr_destroy(&at);
 }
 
+/* ---------- custom resolution: what the game is told the surface size is ---------- */
+typedef long (*cas_f3)(long, long, long);
+static void res_apply(VkSurfaceCapabilitiesKHR *c) {
+    const char *sw = getenv("LAS_RES_W"), *sh = getenv("LAS_RES_H");
+    int w = sw ? atoi(sw) : 0, h = sh ? atoi(sh) : 0;
+    if (w <= 0 || h <= 0 || c->currentExtent.width == 0xFFFFFFFFu) return;
+    static int logged = 0;
+    if (!logged) { logged = 1; LOGI("resolution: surface size %ux%u reported to the game as %dx%d", c->currentExtent.width, c->currentExtent.height, w, h); }
+    c->currentExtent.width = (uint32_t)w; c->currentExtent.height = (uint32_t)h;
+    if (c->minImageExtent.width > (uint32_t)w) c->minImageExtent.width = (uint32_t)w;
+    if (c->minImageExtent.height > (uint32_t)h) c->minImageExtent.height = (uint32_t)h;
+    if (c->maxImageExtent.width < (uint32_t)w) c->maxImageExtent.width = (uint32_t)w;
+    if (c->maxImageExtent.height < (uint32_t)h) c->maxImageExtent.height = (uint32_t)h;
+}
+long vkshim_res_caps(long phys, long surf, long pcaps, cas_f3 real) {
+    long r = real(phys, surf, pcaps);
+    if (r == VK_SUCCESS && pcaps) res_apply((VkSurfaceCapabilitiesKHR *)pcaps);
+    return r;
+}
+long vkshim_res_caps2(long phys, long pinfo, long pcaps, cas_f3 real) {
+    long r = real(phys, pinfo, pcaps);
+    if (r == VK_SUCCESS && pcaps) res_apply(&((VkSurfaceCapabilities2KHR *)pcaps)->surfaceCapabilities);
+    return r;
+}
+
 /* ---------- entry points called from the generated shim ---------- */
 long vkshim_cas_create(long device, long pci, long palloc, long psc, cas_f8 real) {
     if (cas_strength() <= 0.0f || !pci || !psc || !cas_fn_init())

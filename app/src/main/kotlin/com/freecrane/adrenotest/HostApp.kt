@@ -74,7 +74,6 @@ private object GuestSwap : Application.ActivityLifecycleCallbacks {
     override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
         GuestContext.install(activity)
         if (activity.javaClass.classLoader is GuestLoader) FocusGuard.install(activity)
-        if (activity.javaClass.classLoader is GuestLoader) Tweaks.applyResolution(activity)
         if (activity.javaClass.classLoader is GuestLoader) { GuestInspect.dump(activity, false); GuestInspect.probePlay(activity); GuestInspect.reflectPlay(activity); GuestInspect.packReport(activity) }
     }
 
@@ -82,7 +81,6 @@ private object GuestSwap : Application.ActivityLifecycleCallbacks {
         if (activity.javaClass.classLoader is GuestLoader) {
             Log.i("GuestHost", "game activity created: " + activity.javaClass.name)
             GuestInspect.dump(activity, true)
-            Tweaks.applyResolution(activity)
             activity.window.decorView.post {
                 val v = activity.window.decorView
                 Log.i("GuestHost", "resolution: game window is ${v.width}x${v.height}")

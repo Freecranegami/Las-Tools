@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 #include <android/native_window_jni.h>
+#include <android/input.h>
 #include <adrenotools/driver.h>
 
 static void *g_custom = NULL;
@@ -924,7 +925,25 @@ Java_com_freecrane_adrenotest_Native_snapshot(JNIEnv *env, jobject thiz, jstring
 #ifndef R_AARCH64_GLOB_DAT
 #define R_AARCH64_GLOB_DAT 1025
 #endif
-static int g_light = 0;                           /* LAS_LIGHT=1: no diagnostics */
+static int g_light = 0;
+/* custom resolution (LAS_RES_W/H): the game is told its window is this size, and touch positions are scaled to match */
+static int g_resw = 0, g_resh = 0, g_realw = 0, g_realh = 0;
+static int32_t h_anw_w(ANativeWindow *w) {
+    int32_t r = ANativeWindow_getWidth(w);
+    if (g_resw > 0 && r > 0) { if (r != g_realw) { g_realw = r; GLOG("resolution: window width %d reported to the game as %d", r, g_resw); } return g_resw; }
+    return r;
+}
+static int32_t h_anw_h(ANativeWindow *w) {
+    int32_t r = ANativeWindow_getHeight(w);
+    if (g_resh > 0 && r > 0) { if (r != g_realh) { g_realh = r; GLOG("resolution: window height %d reported to the game as %d", r, g_resh); } return g_resh; }
+    return r;
+}
+static float rx(float v) { static int logged = 0; if (g_resw > 0 && g_realw > 0) { if (!logged) { logged = 1; GLOG("resolution: touch x scaled by %d/%d", g_resw, g_realw); } return v * g_resw / g_realw; } return v; }
+static float ry(float v) { return (g_resh > 0 && g_realh > 0) ? v * g_resh / g_realh : v; }
+static float h_ame_x(const AInputEvent *e, size_t i) { return rx(AMotionEvent_getX(e, i)); }
+static float h_ame_y(const AInputEvent *e, size_t i) { return ry(AMotionEvent_getY(e, i)); }
+static float h_ame_rx(const AInputEvent *e, size_t i) { return rx(AMotionEvent_getRawX(e, i)); }
+static float h_ame_ry(const AInputEvent *e, size_t i) { return ry(AMotionEvent_getRawY(e, i)); }                           /* LAS_LIGHT=1: no diagnostics */
 #define FH_SEEN 2048
 static volatile uint32_t g_seen[FH_SEEN];
 static volatile int g_fail_logged = 0, g_ok_logged = 0;
@@ -1128,6 +1147,8 @@ static const struct { const char *name; void *fn; } fh_tab[] = {
     {"__system_property_get", h_spg}, {"glGetString", h_glGetString}, {"eglGetProcAddress", h_eglGetProcAddress},
     {"mkdir", h_mkdir}, {"unlink", h_unlink}, {"rmdir", h_rmdir}, {"remove", h_remove}, {"rename", h_rename},
     {"AAssetManager_open", h_aam_open},
+    {"ANativeWindow_getWidth", h_anw_w}, {"ANativeWindow_getHeight", h_anw_h},
+    {"AMotionEvent_getX", h_ame_x}, {"AMotionEvent_getY", h_ame_y}, {"AMotionEvent_getRawX", h_ame_rx}, {"AMotionEvent_getRawY", h_ame_ry},
     {"open", h_open}, {"__open_2", h_open2}, {"openat", h_openat}, {"__openat_2", h_openat2},
     {"stat", h_stat}, {"lstat", h_lstat}, {"fstatat", h_fstatat}, {"access", h_access},
     {"fopen", h_fopen}, {"opendir", h_opendir}, {NULL, NULL}
@@ -1267,6 +1288,7 @@ Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz,
     { const char *fk = getenv("LAS_FAKE_DIR"); if (fk) strncpy(g_fake, fk, sizeof g_fake - 1); }
     GLOG("file hooks: Android/data and Android/obb of %s -> %s; fake dir %s", g_pkg, g_ext, g_fake);
     { const char *lt = getenv("LAS_LIGHT"); g_light = (lt && *lt == '1'); }
+    { const char *rw = getenv("LAS_RES_W"), *rh = getenv("LAS_RES_H"); g_resw = rw ? atoi(rw) : 0; g_resh = rh ? atoi(rh) : 0; if (g_resw <= 0 || g_resh <= 0) g_resw = g_resh = 0; }
     if (!g_light) errpipe_install();
     GLOG("file hooks: light mode %s", g_light ? "ON (diagnostics off)" : "off");
     pthread_t t;

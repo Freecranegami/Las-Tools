@@ -458,7 +458,7 @@ class MainActivity : Activity() {
                 if (which < pcts.size) {
                     val (w, h) = if (pcts[which] == 100) Pair(0, 0) else sized(pcts[which])
                     Tweaks.setRes(this, w, h)
-                    out.text = (if (w == 0) "Resolution: native." else "Resolution: $w x $h, scaled up to the screen.") +
+                    out.text = (if (w == 0) "Resolution: native." else "Resolution: $w x $h, scaled up to the screen (the game is told the screen is that size).") +
                         " Applies the next time the game starts. If the game misbehaves, set it back to Native."
                 } else customResolution(out, sw, sh)
             }
