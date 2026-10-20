@@ -491,8 +491,8 @@ class MainActivity : Activity() {
         val on = !Tweaks.sgsr(this)
         Tweaks.setSgsr(this, on)
         val noRes = Tweaks.resW(this) <= 0
-        out.text = if (on) "SGSR upscaling ON: the game renders at the Resolution you set and Snapdragon Game Super Resolution upscales it to the screen. " +
-                    (if (noRes) "Nothing happens until you pick a Resolution below Native. " else "") + "CAS is not used while SGSR works. Applies the next time the game starts. If the screen goes black, turn SGSR off."
+        out.text = if (on) "SGSR upscaling ON: whenever the game renders smaller than the screen (the Resolution you set here, or the game's own resolution option) Snapdragon Game Super Resolution upscales it. " +
+                    (if (noRes) "With Resolution on Native it only works if the game itself is set below the screen size. " else "") + "CAS is not used while SGSR works. Applies the next time the game starts. If the screen goes black, turn SGSR off."
                    else "SGSR upscaling OFF. Applies the next time the game starts."
     }
 

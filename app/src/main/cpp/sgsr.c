@@ -10,7 +10,8 @@
  * game gets an ordinary swapchain (the Android compositor then scales it, as with the plain resolution setting).
  *
  * Shader: sgsr.frag, from github.com/SnapdragonGameStudios/snapdragon-gsr (BSD-3-Clause, Qualcomm Innovation Center).
- * Needs LAS_SGSR=1 and a custom resolution (LAS_RES_W / LAS_RES_H) smaller than the screen. */
+ * Needs LAS_SGSR=1. It applies to any swapchain the game makes smaller than the screen, whether that size comes from the
+ * custom resolution setting or from the game's own resolution option. */
 #include <vulkan/vulkan.h>
 #include <android/log.h>
 #include <pthread.h>
@@ -115,10 +116,7 @@ static Sg *find(VkSwapchainKHR sc) {
 
 int vkshim_sgsr_enabled(void) {
     static int s = -1;
-    if (s < 0) {
-        const char *e = getenv("LAS_SGSR"), *w = getenv("LAS_RES_W"), *h = getenv("LAS_RES_H");
-        s = (e && *e == '1' && w && h && atoi(w) > 0 && atoi(h) > 0) ? 1 : 0;
-    }
+    if (s < 0) { const char *e = getenv("LAS_SGSR"); s = (e && *e == '1') ? 1 : 0; }
     return s;
 }
 
