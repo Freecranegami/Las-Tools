@@ -23,6 +23,8 @@ object GpuSpoof {
         Preset("Adreno (TM) 735 + Qualcomm driver identity", "Adreno (TM) 735", "43050B00", true),
         Preset("Adreno (TM) 740 + Qualcomm driver identity", "Adreno (TM) 740", "43050A01", true),
         Preset("Adreno (TM) 750 + Qualcomm driver identity", "Adreno (TM) 750", "43051401", true),
+        Preset("Adreno (TM) 660", "Adreno (TM) 660", "06060001", false),
+        Preset("Adreno (TM) 660 + Qualcomm driver identity", "Adreno (TM) 660", "06060001", true),
     )
 
     val cpus = listOf(
@@ -30,6 +32,7 @@ object GpuSpoof {
         CpuPreset("Snapdragon 8s Gen 3 (SM8635)", "SM8635", "crow", 1),
         CpuPreset("Snapdragon 8 Gen 2 (SM8550)", "SM8550", "kalama", 2),
         CpuPreset("Snapdragon 8 Gen 3 (SM8650)", "SM8650", "pineapple", 3),
+        CpuPreset("Snapdragon 888 (SM8350)", "SM8350", "lahaina", 7),
     )
 
     // A whole phone model: games often pick graphics limits from a device-model list, not from the GPU.
@@ -40,6 +43,8 @@ object GpuSpoof {
         DevicePreset("Off (real phone model)", "", "", "", "", 0, 0),
         DevicePreset("Samsung Galaxy S24 Ultra (Snapdragon 8 Gen 3, Adreno 750)", "samsung", "samsung", "SM-S928B", "e3q", 3, 3),
         DevicePreset("Samsung Galaxy S23 Ultra (Snapdragon 8 Gen 2, Adreno 740)", "samsung", "samsung", "SM-S918B", "dm3q", 2, 2),
+        DevicePreset("Xiaomi Mi 11 (Snapdragon 888, Adreno 660)", "Xiaomi", "Xiaomi", "M2011K2G", "venus", 7, 4),
+        DevicePreset("Samsung Galaxy S21 Ultra (Snapdragon 888, Adreno 660)", "samsung", "samsung", "SM-G998U", "p3q", 7, 4),
     )
 
     private const val PREFS = "las"

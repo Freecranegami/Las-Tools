@@ -496,6 +496,13 @@ class MainActivity : Activity() {
                    else "SGSR upscaling OFF. Applies the next time the game starts."
     }
 
+    private fun toggleFxaa(out: TextView) {
+        val on = !Tweaks.fxaa(this)
+        Tweaks.setFxaa(this, on)
+        out.text = if (on) "FXAA anti-aliasing ON: smooths jagged edges (before the upscale when SGSR is on, and before CAS). Applies the next time the game starts. If the screen goes black, turn it off."
+                   else "FXAA anti-aliasing OFF. Applies the next time the game starts."
+    }
+
     private fun chooseCas(out: TextView) {
         val labels = Tweaks.casLevels.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
@@ -582,7 +589,8 @@ class MainActivity : Activity() {
                 btn("CAS sharpening") { chooseCas(out) },
                 btn("Resolution") { chooseResolution(out) }))
             addView(row(
-                btn("SGSR upscaling on/off") { toggleSgsr(out) }))
+                btn("SGSR upscaling on/off") { toggleSgsr(out) },
+                btn("FXAA on/off") { toggleFxaa(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))

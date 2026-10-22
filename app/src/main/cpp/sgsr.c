@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "sgsr_spv.h"
+#include "fxaa_spv.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "GuestHost", __VA_ARGS__)
 extern void *vkshim_real_proc(const char *name);
@@ -101,6 +102,9 @@ typedef struct {
     VkDescriptorSet ds[MAXIMG]; VkCommandBuffer cmd[MAXIMG]; VkSemaphore sem[MAXIMG];
     VkSampler samp; VkRenderPass rp; VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkPipeline pipe;
     VkDescriptorPool dp; VkCommandPool pool; VkShaderModule vs, fs;
+    /* FXAA before the upscale: game image -> FXAA -> intermediate image (game size) -> SGSR */
+    int fx; VkImage qimg[MAXIMG]; VkDeviceMemory qmem[MAXIMG]; VkImageView qview[MAXIMG]; VkFramebuffer qfb[MAXIMG];
+    VkDescriptorSet dsq[MAXIMG]; VkRenderPass rpm; VkPipeline pipefx; VkShaderModule fvs, ffs;
     unsigned long presents;
 } Sg;
 static Sg g_sg[MAXSC];
@@ -131,7 +135,15 @@ static void teardown(Sg *c) {
         if (c->pview[i]) F.DestroyImageView(d, c->pview[i], NULL);
         if (c->pimg[i]) F.DestroyImage(d, c->pimg[i], NULL);
         if (c->pmem[i]) F.FreeMemory(d, c->pmem[i], NULL);
+        if (c->qfb[i]) F.DestroyFramebuffer(d, c->qfb[i], NULL);
+        if (c->qview[i]) F.DestroyImageView(d, c->qview[i], NULL);
+        if (c->qimg[i]) F.DestroyImage(d, c->qimg[i], NULL);
+        if (c->qmem[i]) F.FreeMemory(d, c->qmem[i], NULL);
     }
+    if (c->pipefx) F.DestroyPipeline(d, c->pipefx, NULL);
+    if (c->rpm) F.DestroyRenderPass(d, c->rpm, NULL);
+    if (c->fvs) F.DestroyShaderModule(d, c->fvs, NULL);
+    if (c->ffs) F.DestroyShaderModule(d, c->ffs, NULL);
     if (c->pipe) F.DestroyPipeline(d, c->pipe, NULL);
     if (c->dp) F.DestroyDescriptorPool(d, c->dp, NULL);
     if (c->pl) F.DestroyPipelineLayout(d, c->pl, NULL);
@@ -156,6 +168,32 @@ static uint32_t pick_memtype(VkDevice dev, uint32_t bits) {
 
 #define ST(what, call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) { LOGI("sgsr: %s failed (%d)", what, (int)r_); return -1; } } while (0)
 
+static VkResult mk_pipe(Sg *c, VkShaderModule vs, VkShaderModule fs, VkRenderPass rp, VkExtent2D ext, VkPipeline *out) {
+    VkPipelineShaderStageCreateInfo st[2] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main" } };
+    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+    VkViewport vp = { 0, 0, (float)ext.width, (float)ext.height, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, ext };
+    VkPipelineViewportStateCreateInfo vs2 = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &sc };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f };
+    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+    VkPipelineColorBlendAttachmentState cba = { .blendEnable = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT };
+    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1, .pAttachments = &cba };
+    VkGraphicsPipelineCreateInfo gpi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = st,
+        .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs2, .pRasterizationState = &rs,
+        .pMultisampleState = &ms, .pColorBlendState = &cb, .layout = c->pl, .renderPass = rp, .subpass = 0,
+        .basePipelineIndex = -1 };
+    return F.CreateGraphicsPipelines(c->dev, VK_NULL_HANDLE, 1, &gpi, NULL, out);
+}
+
 /* proxy images, views, pipeline and one pre-recorded command buffer per image; returns 0 on success */
 static int build(Sg *c, VkImageUsageFlags gameUsage) {
     VkDevice d = c->dev;
@@ -179,6 +217,16 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
         ST("create proxy view", F.CreateImageView(d, &vci, NULL, &c->pview[i]));
         vci.image = c->rimg[i];
         ST("create swapchain view", F.CreateImageView(d, &vci, NULL, &c->rview[i]));
+        if (c->fx) {
+            ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            ST("create intermediate image", F.CreateImage(d, &ici, NULL, &c->qimg[i]));
+            F.GetImageMemoryRequirements(d, c->qimg[i], &mr);
+            mai.allocationSize = mr.size; mai.memoryTypeIndex = pick_memtype(d, mr.memoryTypeBits);
+            ST("allocate intermediate memory", F.AllocateMemory(d, &mai, NULL, &c->qmem[i]));
+            ST("bind intermediate memory", F.BindImageMemory(d, c->qimg[i], c->qmem[i], 0));
+            vci.image = c->qimg[i];
+            ST("create intermediate view", F.CreateImageView(d, &vci, NULL, &c->qview[i]));
+        }
     }
 
     VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
@@ -204,6 +252,25 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
             .pAttachments = &c->rview[i], .width = c->out.width, .height = c->out.height, .layers = 1 };
         ST("create framebuffer", F.CreateFramebuffer(d, &fi, NULL, &c->fb[i]));
     }
+    if (c->fx) {
+        VkAttachmentDescription am = ad;
+        am.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkSubpassDependency dm[2] = {
+            { .srcSubpass = VK_SUBPASS_EXTERNAL, .dstSubpass = 0, .srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+              .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT },
+            { .srcSubpass = 0, .dstSubpass = VK_SUBPASS_EXTERNAL, .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+              .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+              .dstAccessMask = VK_ACCESS_SHADER_READ_BIT } };
+        VkRenderPassCreateInfo rpm = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &am,
+            .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = 2, .pDependencies = dm };
+        ST("create intermediate render pass", F.CreateRenderPass(d, &rpm, NULL, &c->rpm));
+        for (uint32_t i = 0; i < n; i++) {
+            VkFramebufferCreateInfo fq = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = c->rpm, .attachmentCount = 1,
+                .pAttachments = &c->qview[i], .width = c->in.width, .height = c->in.height, .layers = 1 };
+            ST("create intermediate framebuffer", F.CreateFramebuffer(d, &fq, NULL, &c->qfb[i]));
+        }
+    }
 
     VkDescriptorSetLayoutBinding b = { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT };
@@ -213,19 +280,28 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &c->dsl,
         .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
     ST("create pipeline layout", F.CreatePipelineLayout(d, &pli, NULL, &c->pl));
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, n };
-    VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = n, .poolSizeCount = 1, .pPoolSizes = &ps };
+    uint32_t nsets = c->fx ? 2 * n : n;
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nsets };
+    VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = nsets, .poolSizeCount = 1, .pPoolSizes = &ps };
     ST("create descriptor pool", F.CreateDescriptorPool(d, &dpi, NULL, &c->dp));
-    VkDescriptorSetLayout lays[MAXIMG];
-    for (uint32_t i = 0; i < n; i++) lays[i] = c->dsl;
+    VkDescriptorSetLayout lays[2 * MAXIMG];
+    VkDescriptorSet sets[2 * MAXIMG];
+    for (uint32_t i = 0; i < nsets; i++) lays[i] = c->dsl;
     VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = c->dp,
-        .descriptorSetCount = n, .pSetLayouts = lays };
-    ST("allocate descriptor sets", F.AllocateDescriptorSets(d, &dai, c->ds));
+        .descriptorSetCount = nsets, .pSetLayouts = lays };
+    ST("allocate descriptor sets", F.AllocateDescriptorSets(d, &dai, sets));
     for (uint32_t i = 0; i < n; i++) {
+        c->ds[i] = sets[i];                                   /* game image */
         VkDescriptorImageInfo dii = { c->samp, c->pview[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkWriteDescriptorSet wds = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = c->ds[i], .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii };
         F.UpdateDescriptorSets(d, 1, &wds, 0, NULL);
+        if (c->fx) {
+            c->dsq[i] = sets[n + i];                          /* FXAA output */
+            VkDescriptorImageInfo dq = { c->samp, c->qview[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            wds.dstSet = c->dsq[i]; wds.pImageInfo = &dq;
+            F.UpdateDescriptorSets(d, 1, &wds, 0, NULL);
+        }
     }
 
     VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
@@ -234,29 +310,14 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
     smi.codeSize = sizeof sgsr_fs_spv; smi.pCode = sgsr_fs_spv;
     ST("create fragment shader", F.CreateShaderModule(d, &smi, NULL, &c->fs));
 
-    VkPipelineShaderStageCreateInfo st[2] = {
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = c->vs, .pName = "main" },
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = c->fs, .pName = "main" } };
-    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
-    VkViewport vp = { 0, 0, (float)c->out.width, (float)c->out.height, 0, 1 };
-    VkRect2D sc = { { 0, 0 }, c->out };
-    VkPipelineViewportStateCreateInfo vs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &sc };
-    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f };
-    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
-    VkPipelineColorBlendAttachmentState cba = { .blendEnable = VK_FALSE,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT };
-    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1, .pAttachments = &cba };
-    VkGraphicsPipelineCreateInfo gpi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = st,
-        .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs, .pRasterizationState = &rs,
-        .pMultisampleState = &ms, .pColorBlendState = &cb, .layout = c->pl, .renderPass = c->rp, .subpass = 0,
-        .basePipelineIndex = -1 };
-    ST("create pipeline", F.CreateGraphicsPipelines(d, VK_NULL_HANDLE, 1, &gpi, NULL, &c->pipe));
+    ST("create pipeline", mk_pipe(c, c->vs, c->fs, c->rp, c->out, &c->pipe));
+    if (c->fx) {
+        smi.codeSize = sizeof fxaa_vs_spv; smi.pCode = fxaa_vs_spv;
+        ST("create FXAA vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->fvs));
+        smi.codeSize = sizeof fxaa_fs_spv; smi.pCode = fxaa_fs_spv;
+        ST("create FXAA fragment shader", F.CreateShaderModule(d, &smi, NULL, &c->ffs));
+        ST("create FXAA pipeline", mk_pipe(c, c->fvs, c->ffs, c->rpm, c->in, &c->pipefx));
+    }
 
     VkCommandPoolCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = c->family };
     ST("create command pool", F.CreateCommandPool(d, &cpi, NULL, &c->pool));
@@ -279,11 +340,20 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = c->pimg[i], .subresourceRange = rng };
         F.CmdPipelineBarrier(cb2, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b1);
 
+        if (c->fx) {
+            VkRenderPassBeginInfo rbq = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->rpm, .framebuffer = c->qfb[i],
+                .renderArea = { { 0, 0 }, c->in } };
+            F.CmdBeginRenderPass(cb2, &rbq, VK_SUBPASS_CONTENTS_INLINE);
+            F.CmdBindPipeline(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pipefx);
+            F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1, &c->ds[i], 0, NULL);
+            F.CmdDraw(cb2, 3, 1, 0, 0);
+            F.CmdEndRenderPass(cb2);
+        }
         VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->rp, .framebuffer = c->fb[i],
             .renderArea = { { 0, 0 }, c->out } };
         F.CmdBeginRenderPass(cb2, &rbi, VK_SUBPASS_CONTENTS_INLINE);
         F.CmdBindPipeline(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pipe);
-        F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1, &c->ds[i], 0, NULL);
+        F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1, c->fx ? &c->dsq[i] : &c->ds[i], 0, NULL);
         F.CmdPushConstants(cb2, c->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, vinfo);
         F.CmdDraw(cb2, 3, 1, 0, 0);
         F.CmdEndRenderPass(cb2);
@@ -343,6 +413,7 @@ int vkshim_sgsr_create(long device, long pci, long palloc, long psc, sg_f8 real,
 
     Sg *c = &g_sg[slot];
     memset(c, 0, sizeof *c);
+    { const char *fe = getenv("LAS_FXAA"); c->fx = (fe && *fe == '1'); }
     c->used = 1; c->dev = dev; c->fmt = ci.imageFormat; c->in = ci.imageExtent; c->out = caps.currentExtent; c->family = family;
 
     VkSwapchainCreateInfoKHR rci = ci;
@@ -372,7 +443,8 @@ int vkshim_sgsr_create(long device, long pci, long palloc, long psc, sg_f8 real,
     }
     *(VkSwapchainKHR *)psc = sc;
     *res = VK_SUCCESS;
-    LOGI("sgsr: on: game renders %ux%u, screen %ux%u, %u images, format %d", c->in.width, c->in.height, c->out.width, c->out.height, n, (int)c->fmt);
+    LOGI("sgsr: on: game renders %ux%u, screen %ux%u, %u images, format %d%s", c->in.width, c->in.height, c->out.width, c->out.height, n, (int)c->fmt,
+         c->fx ? ", FXAA before the upscale" : "");
     return 1;
 }
 

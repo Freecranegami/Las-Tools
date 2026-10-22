@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "cas_spv.h"
+#include "fxaa_spv.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "GuestHost", __VA_ARGS__)
 extern void *vkshim_real_proc(const char *name);
@@ -95,9 +96,18 @@ typedef struct {
     VkImage priv; VkDeviceMemory pmem; VkImageView pview; VkSampler samp;
     VkRenderPass rp; VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkPipeline pipe;
     VkDescriptorPool dp; VkDescriptorSet ds; VkCommandPool pool; VkShaderModule vs, fs;
+    /* FXAA: its own shaders, a linear sampler, and (FXAA followed by CAS) an intermediate image and second pass */
+    VkShaderModule fvs, ffs; VkSampler sampL; VkImage mid; VkDeviceMemory midmem; VkImageView midview; VkFramebuffer midfb;
+    VkRenderPass rpmid; VkPipeline pipe2; VkDescriptorSet ds2;
     unsigned long presents;
 } Cas;
 static Cas g_cas[MAXSC];
+
+static int fxaa_on(void) {
+    static int s = -1;
+    if (s < 0) { const char *e = getenv("LAS_FXAA"); s = (e && *e == '1') ? 1 : 0; }
+    return s;
+}
 
 static float cas_strength(void) {
     static float s = -2.0f;
@@ -169,6 +179,15 @@ static void cas_teardown(Cas *c) {
         if (c->fbs[i]) F.DestroyFramebuffer(d, c->fbs[i], NULL);
         if (c->views[i]) F.DestroyImageView(d, c->views[i], NULL);
     }
+    if (c->pipe2) F.DestroyPipeline(d, c->pipe2, NULL);
+    if (c->midfb) F.DestroyFramebuffer(d, c->midfb, NULL);
+    if (c->rpmid) F.DestroyRenderPass(d, c->rpmid, NULL);
+    if (c->midview) F.DestroyImageView(d, c->midview, NULL);
+    if (c->mid) F.DestroyImage(d, c->mid, NULL);
+    if (c->midmem) F.FreeMemory(d, c->midmem, NULL);
+    if (c->fvs) F.DestroyShaderModule(d, c->fvs, NULL);
+    if (c->ffs) F.DestroyShaderModule(d, c->ffs, NULL);
+    if (c->sampL) F.DestroySampler(d, c->sampL, NULL);
     if (c->pipe) F.DestroyPipeline(d, c->pipe, NULL);
     if (c->dp) F.DestroyDescriptorPool(d, c->dp, NULL);
     if (c->pl) F.DestroyPipelineLayout(d, c->pl, NULL);
@@ -200,9 +219,68 @@ static uint32_t pick_memtype(VkDevice dev, uint32_t bits) {
     return 0;
 }
 
+static VkResult mk_rp(Cas *c, int toRead, VkRenderPass *out) {
+    /* toRead: an intermediate target (starts undefined, is read by the next pass); otherwise the swapchain image */
+    VkAttachmentDescription ad = { .format = c->fmt, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = toRead ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .finalLayout = toRead ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR };
+    VkAttachmentReference ar = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1, .pColorAttachments = &ar };
+    VkSubpassDependency dep[2] = {
+        { .srcSubpass = VK_SUBPASS_EXTERNAL, .dstSubpass = 0, .srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+          .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT },
+        { .srcSubpass = 0, .dstSubpass = VK_SUBPASS_EXTERNAL, .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+          .dstAccessMask = VK_ACCESS_SHADER_READ_BIT } };
+    VkRenderPassCreateInfo rpi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ad,
+        .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = toRead ? 2u : 0u, .pDependencies = dep };
+    return F.CreateRenderPass(c->dev, &rpi, NULL, out);
+}
+
+static VkResult mk_pipe(Cas *c, VkShaderModule vs, VkShaderModule fs, VkRenderPass rp, VkPipeline *out) {
+    VkPipelineShaderStageCreateInfo st[2] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main" } };
+    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+    VkViewport vp = { 0, 0, (float)c->ext.width, (float)c->ext.height, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, c->ext };
+    VkPipelineViewportStateCreateInfo vs2 = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &sc };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f };
+    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+    VkPipelineColorBlendAttachmentState cba = { .blendEnable = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT };
+    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1, .pAttachments = &cba };
+    VkGraphicsPipelineCreateInfo gpi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = st,
+        .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs2, .pRasterizationState = &rs,
+        .pMultisampleState = &ms, .pColorBlendState = &cb, .layout = c->pl, .renderPass = rp, .subpass = 0,
+        .basePipelineIndex = -1 };
+    return F.CreateGraphicsPipelines(c->dev, VK_NULL_HANDLE, 1, &gpi, NULL, out);
+}
+
+static void draw_pass(Cas *c, VkCommandBuffer cb, VkRenderPass rp, VkFramebuffer fb, VkPipeline pipe, VkDescriptorSet ds, float *sharp) {
+    VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb,
+        .renderArea = { { 0, 0 }, c->ext } };
+    F.CmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    F.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    F.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1, &ds, 0, NULL);
+    F.CmdPushConstants(cb, c->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, sharp);
+    F.CmdDraw(cb, 3, 1, 0, 0);
+    F.CmdEndRenderPass(cb);
+}
+
 static void cas_setup_impl(Cas *c, VkQueue queue) {
     VkDevice d = c->dev;
     uint32_t family;
+    int fx = fxaa_on(), sh = cas_strength() > 0.0f, two = fx && sh;      /* two: FXAA first, then CAS */
     if (!queue_family(queue, &family)) { LOGI("cas: off, the present queue's family is unknown"); c->failed = 1; return; }
 
     uint32_t n = 0;
@@ -222,12 +300,21 @@ static void cas_setup_impl(Cas *c, VkQueue queue) {
         .memoryTypeIndex = pick_memtype(d, mr.memoryTypeBits) };
     STEP("allocate memory", F.AllocateMemory(d, &mai, NULL, &c->pmem));
     STEP("bind memory", F.BindImageMemory(d, c->priv, c->pmem, 0));
+    if (two) {
+        ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        STEP("create intermediate image", F.CreateImage(d, &ici, NULL, &c->mid));
+        F.GetImageMemoryRequirements(d, c->mid, &mr);
+        mai.allocationSize = mr.size; mai.memoryTypeIndex = pick_memtype(d, mr.memoryTypeBits);
+        STEP("allocate intermediate memory", F.AllocateMemory(d, &mai, NULL, &c->midmem));
+        STEP("bind intermediate memory", F.BindImageMemory(d, c->mid, c->midmem, 0));
+    }
 
     VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format = c->fmt, .components = { 0, 0, 0, 0 }, .subresourceRange = rng };
     vci.image = c->priv;
     STEP("create private view", F.CreateImageView(d, &vci, NULL, &c->pview));
+    if (two) { vci.image = c->mid; STEP("create intermediate view", F.CreateImageView(d, &vci, NULL, &c->midview)); }
     for (uint32_t i = 0; i < n; i++) {
         vci.image = c->imgs[i];
         STEP("create swapchain view", F.CreateImageView(d, &vci, NULL, &c->views[i]));
@@ -238,20 +325,22 @@ static void cas_setup_impl(Cas *c, VkQueue queue) {
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .maxLod = 0.25f, .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
     STEP("create sampler", F.CreateSampler(d, &sci, NULL, &c->samp));
+    if (fx) {
+        sci.magFilter = VK_FILTER_LINEAR; sci.minFilter = VK_FILTER_LINEAR;
+        STEP("create linear sampler", F.CreateSampler(d, &sci, NULL, &c->sampL));
+    }
 
-    VkAttachmentDescription ad = { .format = c->fmt, .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR };
-    VkAttachmentReference ar = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
-    VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1, .pColorAttachments = &ar };
-    VkRenderPassCreateInfo rpi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ad,
-        .subpassCount = 1, .pSubpasses = &sp };
-    STEP("create render pass", F.CreateRenderPass(d, &rpi, NULL, &c->rp));
+    STEP("create render pass", mk_rp(c, 0, &c->rp));
     for (uint32_t i = 0; i < n; i++) {
         VkFramebufferCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = c->rp, .attachmentCount = 1,
             .pAttachments = &c->views[i], .width = c->ext.width, .height = c->ext.height, .layers = 1 };
         STEP("create framebuffer", F.CreateFramebuffer(d, &fi, NULL, &c->fbs[i]));
+    }
+    if (two) {
+        STEP("create intermediate render pass", mk_rp(c, 1, &c->rpmid));
+        VkFramebufferCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = c->rpmid, .attachmentCount = 1,
+            .pAttachments = &c->midview, .width = c->ext.width, .height = c->ext.height, .layers = 1 };
+        STEP("create intermediate framebuffer", F.CreateFramebuffer(d, &fi, NULL, &c->midfb));
     }
 
     VkDescriptorSetLayoutBinding b = { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -262,46 +351,47 @@ static void cas_setup_impl(Cas *c, VkQueue queue) {
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &c->dsl,
         .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
     STEP("create pipeline layout", F.CreatePipelineLayout(d, &pli, NULL, &c->pl));
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
-    VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps };
+    uint32_t nsets = two ? 2 : 1;
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nsets };
+    VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = nsets, .poolSizeCount = 1, .pPoolSizes = &ps };
     STEP("create descriptor pool", F.CreateDescriptorPool(d, &dpi, NULL, &c->dp));
+    VkDescriptorSetLayout lays[2] = { c->dsl, c->dsl };
+    VkDescriptorSet sets[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
     VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = c->dp,
-        .descriptorSetCount = 1, .pSetLayouts = &c->dsl };
-    STEP("allocate descriptor set", F.AllocateDescriptorSets(d, &dai, &c->ds));
-    VkDescriptorImageInfo dii = { c->samp, c->pview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        .descriptorSetCount = nsets, .pSetLayouts = lays };
+    STEP("allocate descriptor sets", F.AllocateDescriptorSets(d, &dai, sets));
+    c->ds = sets[0]; c->ds2 = sets[1];
+    VkDescriptorImageInfo dii = { fx ? c->sampL : c->samp, c->pview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet wds = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = c->ds, .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii };
     F.UpdateDescriptorSets(d, 1, &wds, 0, NULL);
+    if (two) {
+        VkDescriptorImageInfo dii2 = { c->samp, c->midview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        wds.dstSet = c->ds2; wds.pImageInfo = &dii2;
+        F.UpdateDescriptorSets(d, 1, &wds, 0, NULL);
+    }
 
     VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-    smi.codeSize = sizeof cas_vs_spv; smi.pCode = cas_vs_spv;
-    STEP("create vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->vs));
-    smi.codeSize = sizeof cas_fs_spv; smi.pCode = cas_fs_spv;
-    STEP("create fragment shader", F.CreateShaderModule(d, &smi, NULL, &c->fs));
-
-    VkPipelineShaderStageCreateInfo st[2] = {
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = c->vs, .pName = "main" },
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = c->fs, .pName = "main" } };
-    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
-    VkViewport vp = { 0, 0, (float)c->ext.width, (float)c->ext.height, 0, 1 };
-    VkRect2D sc = { { 0, 0 }, c->ext };
-    VkPipelineViewportStateCreateInfo vs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &sc };
-    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f };
-    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
-    VkPipelineColorBlendAttachmentState cba = { .blendEnable = VK_FALSE,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT };
-    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1, .pAttachments = &cba };
-    VkGraphicsPipelineCreateInfo gpi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = st,
-        .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs, .pRasterizationState = &rs,
-        .pMultisampleState = &ms, .pColorBlendState = &cb, .layout = c->pl, .renderPass = c->rp, .subpass = 0,
-        .basePipelineIndex = -1 };
-    STEP("create pipeline", F.CreateGraphicsPipelines(d, VK_NULL_HANDLE, 1, &gpi, NULL, &c->pipe));
+    if (sh) {
+        smi.codeSize = sizeof cas_vs_spv; smi.pCode = cas_vs_spv;
+        STEP("create vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->vs));
+        smi.codeSize = sizeof cas_fs_spv; smi.pCode = cas_fs_spv;
+        STEP("create fragment shader", F.CreateShaderModule(d, &smi, NULL, &c->fs));
+    }
+    if (fx) {
+        smi.codeSize = sizeof fxaa_vs_spv; smi.pCode = fxaa_vs_spv;
+        STEP("create FXAA vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->fvs));
+        smi.codeSize = sizeof fxaa_fs_spv; smi.pCode = fxaa_fs_spv;
+        STEP("create FXAA fragment shader", F.CreateShaderModule(d, &smi, NULL, &c->ffs));
+    }
+    if (two) {
+        STEP("create FXAA pipeline", mk_pipe(c, c->fvs, c->ffs, c->rpmid, &c->pipe));
+        STEP("create CAS pipeline", mk_pipe(c, c->vs, c->fs, c->rp, &c->pipe2));
+    } else if (fx) {
+        STEP("create FXAA pipeline", mk_pipe(c, c->fvs, c->ffs, c->rp, &c->pipe));
+    } else {
+        STEP("create CAS pipeline", mk_pipe(c, c->vs, c->fs, c->rp, &c->pipe));
+    }
 
     VkCommandPoolCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = family };
     STEP("create command pool", F.CreateCommandPool(d, &cpi, NULL, &c->pool));
@@ -342,19 +432,18 @@ static void cas_setup_impl(Cas *c, VkQueue queue) {
         F.CmdPipelineBarrier(cb2, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             0, 0, NULL, 0, NULL, 2, b2);
 
-        /* 3. CAS: private image -> swapchain image */
-        VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->rp, .framebuffer = c->fbs[i],
-            .renderArea = { { 0, 0 }, c->ext } };
-        F.CmdBeginRenderPass(cb2, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-        F.CmdBindPipeline(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pipe);
-        F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1, &c->ds, 0, NULL);
-        F.CmdPushConstants(cb2, c->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, &sharp);
-        F.CmdDraw(cb2, 3, 1, 0, 0);
-        F.CmdEndRenderPass(cb2);
+        /* 3. the filter(s): private image -> [intermediate image ->] swapchain image */
+        if (two) {
+            draw_pass(c, cb2, c->rpmid, c->midfb, c->pipe, c->ds, &sharp);
+            draw_pass(c, cb2, c->rp, c->fbs[i], c->pipe2, c->ds2, &sharp);
+        } else {
+            draw_pass(c, cb2, c->rp, c->fbs[i], c->pipe, c->ds, &sharp);
+        }
         STEP("end command buffer", F.EndCommandBuffer(cb2));
     }
     c->ready = 1;
-    LOGI("cas: ready: %u images, format %d, %ux%u, strength %.2f", n, (int)c->fmt, c->ext.width, c->ext.height, sharp);
+    LOGI("cas: ready: %u images, format %d, %ux%u, %s%s strength %.2f", n, (int)c->fmt, c->ext.width, c->ext.height,
+         fx ? "FXAA" : "", two ? " + CAS" : (sh ? "CAS" : ""), sharp);
 }
 
 /* The game's present thread has a small stack and creating the pipeline runs the driver's shader compiler,
@@ -402,7 +491,7 @@ long vkshim_res_caps2(long phys, long pinfo, long pcaps, cas_f3 real) {
 /* ---------- entry points called from the generated shim ---------- */
 long vkshim_cas_create(long device, long pci, long palloc, long psc, cas_f8 real) {
     { long sr; if (vkshim_sgsr_create(device, pci, palloc, psc, real, &sr)) return sr; }
-    if (cas_strength() <= 0.0f || !pci || !psc || !cas_fn_init())
+    if ((cas_strength() <= 0.0f && !fxaa_on()) || !pci || !psc || !cas_fn_init())
         return real(device, pci, palloc, psc, 0, 0, 0, 0);
     VkSwapchainCreateInfoKHR ci = *(const VkSwapchainCreateInfoKHR *)pci;
     int slot = -1;

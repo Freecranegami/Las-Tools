@@ -23,6 +23,10 @@ object Tweaks {
     fun casIndex(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("cas_level", 0).coerceIn(0, casLevels.size - 1)
     fun setCas(ctx: Context, i: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("cas_level", i).commit() }
 
+    // FXAA: anti-aliasing of the picture the game presents (before the upscale when SGSR is used).
+    fun fxaa(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("fxaa", false)
+    fun setFxaa(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("fxaa", on).commit() }
+
     // SGSR: the game renders at the custom resolution and the picture is upscaled to the screen by Snapdragon Game Super
     // Resolution 1 (needs a custom resolution below the screen size).
     fun sgsr(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("sgsr", false)
@@ -50,9 +54,10 @@ object Tweaks {
             val rw = resW(ctx); val rh = resH(ctx)
             Os.setenv("LAS_RES_W", if (rw > 0 && rh > 0) rw.toString() else "0", true)
             Os.setenv("LAS_RES_H", if (rw > 0 && rh > 0) rh.toString() else "0", true)
+            Os.setenv("LAS_FXAA", if (fxaa(ctx)) "1" else "0", true)
             Os.setenv("LAS_SGSR", if (sgsr(ctx)) "1" else "0", true)
             Os.setenv("LAS_CAS", if (c.strength > 0f) c.strength.toString() else "0", true)
-            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; SGSR ${if (sgsr(ctx)) "on" else "off"}")
+            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; SGSR ${if (sgsr(ctx)) "on" else "off"}; FXAA ${if (fxaa(ctx)) "on" else "off"}")
         } catch (t: Throwable) {
             Log.w("GuestHost", "tweaks failed: $t")
         }
