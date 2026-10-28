@@ -89,7 +89,7 @@ object GuestAssetPacks {
         for (f in Util.guestSplits(root)) {
             for (key in linkedSetOf(canonicalName(f), rawName(f))) {
                 packs.getOrPut(key) { ArrayList() }.add(f)
-                sizes[key] = (sizes[key] ?: 0L) + f.length()
+                sizes[key] = (sizes[key] ?: 0L) + origSize(f)
             }
         }
         val local = packs.keys
@@ -274,8 +274,55 @@ object GuestAssetPacks {
         val packs = LinkedHashMap<String, MutableList<File>>()
         for (f in Util.guestSplits(root)) packs.getOrPut(canonicalName(f)) { ArrayList() }.add(f)
         Log.i(TAG, "asset packs: unpacking all before launch: " + packs.keys)
-        for ((n, fs) in packs) ensureExtracted(n, root, fs)
+        for ((n, fs) in packs) {
+            val dir = ensureExtracted(n, root, fs)
+            if (dir != null) for (f in fs) shrink(f, root)
+        }
         Log.i(TAG, "asset packs: all packs unpacked")
+    }
+
+    // Once a pack's files are unpacked, the split APK holding the same bytes is replaced by a tiny
+    // stub, so the game isn't stored twice. Only pure data splits are touched (assets only: no
+    // code, libraries or resources). The original size is kept in a side file because the game's
+    // asset-pack answers report it.
+    private fun origSize(f: File): Long {
+        val side = File(f.path + ".size")
+        return try { if (side.exists()) side.readText().trim().toLong() else f.length() }
+        catch (t: Throwable) { f.length() }
+    }
+
+    private fun shrink(f: File, root: File) {
+        try {
+            if (File(f.path + ".size").exists()) return
+            var assets = 0
+            var other = false
+            ZipFile(f).use { z ->
+                val en = z.entries()
+                while (en.hasMoreElements()) {
+                    val n = en.nextElement().name
+                    if (n.startsWith("assets/")) assets++
+                    else if (n == "resources.arsc" || n.endsWith(".dex") || n.startsWith("lib/")) other = true
+                }
+            }
+            if (assets == 0 || other) return
+            val dexList = File(root, "dexapks.txt")
+            if (dexList.exists() && dexList.readLines().any { it.endsWith(f.name) }) return
+            val size = f.length()
+            val tmp = File(f.path + ".tmp")
+            java.util.zip.ZipOutputStream(tmp.outputStream()).use { z ->
+                z.putNextEntry(java.util.zip.ZipEntry("las_stub"))
+                z.write(0)
+                z.closeEntry()
+            }
+            File(f.path + ".size").writeText(size.toString())
+            f.setWritable(true)
+            f.delete()
+            tmp.renameTo(f)
+            f.setReadOnly()
+            Log.i(TAG, "asset packs: freed ${(size - f.length()) / 1024 / 1024} MB by replacing ${f.name} (already unpacked)")
+        } catch (t: Throwable) {
+            Log.w(TAG, "asset packs: shrink ${f.name} failed: $t")
+        }
     }
 
     @Synchronized
