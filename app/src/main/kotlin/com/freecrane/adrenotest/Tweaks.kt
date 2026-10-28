@@ -27,10 +27,20 @@ object Tweaks {
     fun fxaa(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("fxaa", false)
     fun setFxaa(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("fxaa", on).commit() }
 
-    // SGSR: the game renders at the custom resolution and the picture is upscaled to the screen by Snapdragon Game Super
-    // Resolution 1 (needs a custom resolution below the screen size).
-    fun sgsr(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("sgsr", false)
-    fun setSgsr(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("sgsr", on).commit() }
+    // Upscaler: the game renders smaller than the screen (the Resolution set here, or the game's own resolution option)
+    // and the picture is upscaled to the screen: 0 = off, 1 = Snapdragon Game Super Resolution 1, 2 = AMD FSR 1 (EASU + RCAS).
+    val upscalers = listOf("Off", "SGSR 1 (Snapdragon Game Super Resolution)", "FSR 1 (AMD FidelityFX, EASU + RCAS)")
+    fun upscaler(ctx: Context): Int {
+        val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return p.getInt("upscaler", if (p.getBoolean("sgsr", false)) 1 else 0).coerceIn(0, 2)
+    }
+    fun setUpscaler(ctx: Context, i: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("upscaler", i).commit() }
+
+    // FSR 1's RCAS sharpening, shown as 0..100 % (100 % = sharpest). The filter itself takes "stops" of reduction: 0 stops is
+    // the sharpest, 2 stops is very soft; AMD suggests about 0.2 as a default.
+    fun rcasPercent(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("rcas_pct", 90).coerceIn(0, 100)
+    fun setRcasPercent(ctx: Context, v: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("rcas_pct", v.coerceIn(0, 100)).commit() }
+    fun rcasStops(pct: Int): Float = (100 - pct.coerceIn(0, 100)) / 100f * 2f
 
     // Custom resolution: the game is told the screen is this size (window size queries, Vulkan surface size, touch
     // positions) so it renders smaller and the system scales the picture up. 0x0 = the screen's own size.
@@ -55,9 +65,12 @@ object Tweaks {
             Os.setenv("LAS_RES_W", if (rw > 0 && rh > 0) rw.toString() else "0", true)
             Os.setenv("LAS_RES_H", if (rw > 0 && rh > 0) rh.toString() else "0", true)
             Os.setenv("LAS_FXAA", if (fxaa(ctx)) "1" else "0", true)
-            Os.setenv("LAS_SGSR", if (sgsr(ctx)) "1" else "0", true)
+            val up = upscaler(ctx)
+            Os.setenv("LAS_SGSR", if (up == 1) "1" else "0", true)
+            Os.setenv("LAS_FSR", if (up == 2) "1" else "0", true)
+            Os.setenv("LAS_RCAS", rcasStops(rcasPercent(ctx)).toString(), true)
             Os.setenv("LAS_CAS", if (c.strength > 0f) c.strength.toString() else "0", true)
-            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; SGSR ${if (sgsr(ctx)) "on" else "off"}; FXAA ${if (fxaa(ctx)) "on" else "off"}")
+            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; FXAA ${if (fxaa(ctx)) "on" else "off"}")
         } catch (t: Throwable) {
             Log.w("GuestHost", "tweaks failed: $t")
         }

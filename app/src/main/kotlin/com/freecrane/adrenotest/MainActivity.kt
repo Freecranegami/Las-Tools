@@ -487,13 +487,42 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun toggleSgsr(out: TextView) {
-        val on = !Tweaks.sgsr(this)
-        Tweaks.setSgsr(this, on)
-        val noRes = Tweaks.resW(this) <= 0
-        out.text = if (on) "SGSR upscaling ON: whenever the game renders smaller than the screen (the Resolution you set here, or the game's own resolution option) Snapdragon Game Super Resolution upscales it. " +
-                    (if (noRes) "With Resolution on Native it only works if the game itself is set below the screen size. " else "") + "CAS is not used while SGSR works. Applies the next time the game starts. If the screen goes black, turn SGSR off."
-                   else "SGSR upscaling OFF. Applies the next time the game starts."
+    private fun chooseUpscaler(out: TextView) {
+        val labels = Tweaks.upscalers.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Upscaler")
+            .setSingleChoiceItems(labels, Tweaks.upscaler(this)) { d, which ->
+                Tweaks.setUpscaler(this, which)
+                d.dismiss()
+                out.text = if (which == 0) "Upscaler OFF. Applies the next time the game starts."
+                else "Upscaler: ${Tweaks.upscalers[which]}. Whenever the game renders smaller than the screen (the Resolution you set here, " +
+                    "or the game's own resolution option) the picture is upscaled to the screen. " +
+                    (if (Tweaks.resW(this) <= 0) "With Resolution on Native it only works if the game itself is set below the screen size. " else "") +
+                    "CAS is not used while an upscaler works. Applies the next time the game starts. If the screen goes black, turn the upscaler off."
+            }
+            .show()
+    }
+
+    private fun chooseRcas(out: TextView) {
+        val bar = android.widget.SeekBar(this).apply { max = 100; progress = Tweaks.rcasPercent(this@MainActivity) }
+        val label = TextView(this).apply { setPadding(48, 32, 48, 0) }
+        fun show(p: Int) { label.text = "RCAS sharpness: $p %  (${"%.2f".format(Tweaks.rcasStops(p))} stops; 100 % is the sharpest)" }
+        show(bar.progress)
+        bar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: android.widget.SeekBar?, p: Int, fromUser: Boolean) { show(p) }
+            override fun onStartTrackingTouch(s: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(s: android.widget.SeekBar?) {}
+        })
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 16, 24, 0); addView(label); addView(bar) }
+        AlertDialog.Builder(this)
+            .setTitle("FSR 1 sharpening (RCAS)")
+            .setView(box)
+            .setPositiveButton("Set") { _, _ ->
+                Tweaks.setRcasPercent(this, bar.progress)
+                out.text = "RCAS sharpness ${bar.progress} %. Only used when the upscaler is FSR 1. Applies the next time the game starts."
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun toggleFxaa(out: TextView) {
@@ -589,7 +618,9 @@ class MainActivity : Activity() {
                 btn("CAS sharpening") { chooseCas(out) },
                 btn("Resolution") { chooseResolution(out) }))
             addView(row(
-                btn("SGSR upscaling on/off") { toggleSgsr(out) },
+                btn("Upscaler (SGSR / FSR)") { chooseUpscaler(out) },
+                btn("RCAS sharpness") { chooseRcas(out) }))
+            addView(row(
                 btn("FXAA on/off") { toggleFxaa(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },

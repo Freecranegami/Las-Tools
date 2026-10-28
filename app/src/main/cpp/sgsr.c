@@ -17,9 +17,11 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <stdint.h>
 #include "sgsr_spv.h"
 #include "fxaa_spv.h"
+#include "fsr_spv.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "GuestHost", __VA_ARGS__)
 extern void *vkshim_real_proc(const char *name);
@@ -105,6 +107,9 @@ typedef struct {
     /* FXAA before the upscale: game image -> FXAA -> intermediate image (game size) -> SGSR */
     int fx; VkImage qimg[MAXIMG]; VkDeviceMemory qmem[MAXIMG]; VkImageView qview[MAXIMG]; VkFramebuffer qfb[MAXIMG];
     VkDescriptorSet dsq[MAXIMG]; VkRenderPass rpm; VkPipeline pipefx; VkShaderModule fvs, ffs;
+    /* FSR 1 (mode 2): game image [-> FXAA] -> EASU -> full-size image -> RCAS -> swapchain image */
+    int mode; float rcas; VkImage uimg[MAXIMG]; VkDeviceMemory umem[MAXIMG]; VkImageView uview[MAXIMG]; VkFramebuffer ufb[MAXIMG];
+    VkDescriptorSet dsu[MAXIMG]; VkPipeline pipee; VkShaderModule efs;
     unsigned long presents;
 } Sg;
 static Sg g_sg[MAXSC];
@@ -120,7 +125,7 @@ static Sg *find(VkSwapchainKHR sc) {
 
 int vkshim_sgsr_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("LAS_SGSR"); s = (e && *e == '1') ? 1 : 0; }
+    if (s < 0) { const char *e = getenv("LAS_SGSR"), *f = getenv("LAS_FSR"); s = ((e && *e == '1') || (f && *f == '1')) ? 1 : 0; }
     return s;
 }
 
@@ -135,11 +140,17 @@ static void teardown(Sg *c) {
         if (c->pview[i]) F.DestroyImageView(d, c->pview[i], NULL);
         if (c->pimg[i]) F.DestroyImage(d, c->pimg[i], NULL);
         if (c->pmem[i]) F.FreeMemory(d, c->pmem[i], NULL);
+        if (c->ufb[i]) F.DestroyFramebuffer(d, c->ufb[i], NULL);
+        if (c->uview[i]) F.DestroyImageView(d, c->uview[i], NULL);
+        if (c->uimg[i]) F.DestroyImage(d, c->uimg[i], NULL);
+        if (c->umem[i]) F.FreeMemory(d, c->umem[i], NULL);
         if (c->qfb[i]) F.DestroyFramebuffer(d, c->qfb[i], NULL);
         if (c->qview[i]) F.DestroyImageView(d, c->qview[i], NULL);
         if (c->qimg[i]) F.DestroyImage(d, c->qimg[i], NULL);
         if (c->qmem[i]) F.FreeMemory(d, c->qmem[i], NULL);
     }
+    if (c->pipee) F.DestroyPipeline(d, c->pipee, NULL);
+    if (c->efs) F.DestroyShaderModule(d, c->efs, NULL);
     if (c->pipefx) F.DestroyPipeline(d, c->pipefx, NULL);
     if (c->rpm) F.DestroyRenderPass(d, c->rpm, NULL);
     if (c->fvs) F.DestroyShaderModule(d, c->fvs, NULL);
@@ -227,6 +238,17 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
             vci.image = c->qimg[i];
             ST("create intermediate view", F.CreateImageView(d, &vci, NULL, &c->qview[i]));
         }
+        if (c->mode == 2) {
+            ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            ici.extent.width = c->out.width; ici.extent.height = c->out.height;
+            ST("create upscaled image", F.CreateImage(d, &ici, NULL, &c->uimg[i]));
+            F.GetImageMemoryRequirements(d, c->uimg[i], &mr);
+            mai.allocationSize = mr.size; mai.memoryTypeIndex = pick_memtype(d, mr.memoryTypeBits);
+            ST("allocate upscaled memory", F.AllocateMemory(d, &mai, NULL, &c->umem[i]));
+            ST("bind upscaled memory", F.BindImageMemory(d, c->uimg[i], c->umem[i], 0));
+            vci.image = c->uimg[i];
+            ST("create upscaled view", F.CreateImageView(d, &vci, NULL, &c->uview[i]));
+        }
     }
 
     VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
@@ -252,7 +274,7 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
             .pAttachments = &c->rview[i], .width = c->out.width, .height = c->out.height, .layers = 1 };
         ST("create framebuffer", F.CreateFramebuffer(d, &fi, NULL, &c->fb[i]));
     }
-    if (c->fx) {
+    if (c->fx || c->mode == 2) {
         VkAttachmentDescription am = ad;
         am.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         VkSubpassDependency dm[2] = {
@@ -266,9 +288,16 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
             .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = 2, .pDependencies = dm };
         ST("create intermediate render pass", F.CreateRenderPass(d, &rpm, NULL, &c->rpm));
         for (uint32_t i = 0; i < n; i++) {
-            VkFramebufferCreateInfo fq = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = c->rpm, .attachmentCount = 1,
-                .pAttachments = &c->qview[i], .width = c->in.width, .height = c->in.height, .layers = 1 };
-            ST("create intermediate framebuffer", F.CreateFramebuffer(d, &fq, NULL, &c->qfb[i]));
+            if (c->fx) {
+                VkFramebufferCreateInfo fq = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = c->rpm, .attachmentCount = 1,
+                    .pAttachments = &c->qview[i], .width = c->in.width, .height = c->in.height, .layers = 1 };
+                ST("create intermediate framebuffer", F.CreateFramebuffer(d, &fq, NULL, &c->qfb[i]));
+            }
+            if (c->mode == 2) {
+                VkFramebufferCreateInfo fu = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = c->rpm, .attachmentCount = 1,
+                    .pAttachments = &c->uview[i], .width = c->out.width, .height = c->out.height, .layers = 1 };
+                ST("create upscaled framebuffer", F.CreateFramebuffer(d, &fu, NULL, &c->ufb[i]));
+            }
         }
     }
 
@@ -276,16 +305,16 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT };
     VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b };
     ST("create descriptor set layout", F.CreateDescriptorSetLayout(d, &dli, NULL, &c->dsl));
-    VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 };
+    VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64 };
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &c->dsl,
         .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
     ST("create pipeline layout", F.CreatePipelineLayout(d, &pli, NULL, &c->pl));
-    uint32_t nsets = c->fx ? 2 * n : n;
+    uint32_t nsets = n * (1 + (c->fx ? 1 : 0) + (c->mode == 2 ? 1 : 0));
     VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nsets };
     VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = nsets, .poolSizeCount = 1, .pPoolSizes = &ps };
     ST("create descriptor pool", F.CreateDescriptorPool(d, &dpi, NULL, &c->dp));
-    VkDescriptorSetLayout lays[2 * MAXIMG];
-    VkDescriptorSet sets[2 * MAXIMG];
+    VkDescriptorSetLayout lays[3 * MAXIMG];
+    VkDescriptorSet sets[3 * MAXIMG];
     for (uint32_t i = 0; i < nsets; i++) lays[i] = c->dsl;
     VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = c->dp,
         .descriptorSetCount = nsets, .pSetLayouts = lays };
@@ -302,15 +331,31 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
             wds.dstSet = c->dsq[i]; wds.pImageInfo = &dq;
             F.UpdateDescriptorSets(d, 1, &wds, 0, NULL);
         }
+        if (c->mode == 2) {
+            c->dsu[i] = sets[(c->fx ? 2 * n : n) + i];        /* EASU output */
+            VkDescriptorImageInfo du = { c->samp, c->uview[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            wds.dstSet = c->dsu[i]; wds.pImageInfo = &du;
+            F.UpdateDescriptorSets(d, 1, &wds, 0, NULL);
+        }
     }
 
     VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-    smi.codeSize = sizeof sgsr_vs_spv; smi.pCode = sgsr_vs_spv;
-    ST("create vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->vs));
-    smi.codeSize = sizeof sgsr_fs_spv; smi.pCode = sgsr_fs_spv;
-    ST("create fragment shader", F.CreateShaderModule(d, &smi, NULL, &c->fs));
-
-    ST("create pipeline", mk_pipe(c, c->vs, c->fs, c->rp, c->out, &c->pipe));
+    if (c->mode == 2) {
+        smi.codeSize = sizeof fsr_vs_spv; smi.pCode = fsr_vs_spv;
+        ST("create vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->vs));
+        smi.codeSize = sizeof fsr_rcas_fs_spv; smi.pCode = fsr_rcas_fs_spv;
+        ST("create RCAS shader", F.CreateShaderModule(d, &smi, NULL, &c->fs));
+        smi.codeSize = sizeof fsr_easu_fs_spv; smi.pCode = fsr_easu_fs_spv;
+        ST("create EASU shader", F.CreateShaderModule(d, &smi, NULL, &c->efs));
+        ST("create RCAS pipeline", mk_pipe(c, c->vs, c->fs, c->rp, c->out, &c->pipe));
+        ST("create EASU pipeline", mk_pipe(c, c->vs, c->efs, c->rpm, c->out, &c->pipee));
+    } else {
+        smi.codeSize = sizeof sgsr_vs_spv; smi.pCode = sgsr_vs_spv;
+        ST("create vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->vs));
+        smi.codeSize = sizeof sgsr_fs_spv; smi.pCode = sgsr_fs_spv;
+        ST("create fragment shader", F.CreateShaderModule(d, &smi, NULL, &c->fs));
+        ST("create pipeline", mk_pipe(c, c->vs, c->fs, c->rp, c->out, &c->pipe));
+    }
     if (c->fx) {
         smi.codeSize = sizeof fxaa_vs_spv; smi.pCode = fxaa_vs_spv;
         ST("create FXAA vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->fvs));
@@ -328,6 +373,18 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
     for (uint32_t i = 0; i < n; i++) ST("create semaphore", F.CreateSemaphore(d, &semi, NULL, &c->sem[i]));
 
     float vinfo[4] = { 1.0f / (float)c->in.width, 1.0f / (float)c->in.height, (float)c->in.width, (float)c->in.height };
+    /* FSR 1 constants, the same as FsrEasuCon / FsrRcasCon in ffx_fsr1.h (input size = viewport size here) */
+    uint32_t easu[16], rcas[4] = { 0, 0, 0, 0 };
+    {
+        float iw = (float)c->in.width, ih = (float)c->in.height, ow = (float)c->out.width, oh = (float)c->out.height;
+        float e[16] = { iw / ow, ih / oh, 0.5f * iw / ow - 0.5f, 0.5f * ih / oh - 0.5f,
+                        1.0f / iw, 1.0f / ih, 1.0f / iw, -1.0f / ih,
+                        -1.0f / iw, 2.0f / ih, 1.0f / iw, 2.0f / ih,
+                        0.0f, 4.0f / ih, 0.0f, 0.0f };
+        memcpy(easu, e, sizeof easu);                          /* the shader reads the raw bits of these floats */
+        float sh = exp2f(-c->rcas);
+        memcpy(&rcas[0], &sh, 4);
+    }
     for (uint32_t i = 0; i < n; i++) {
         VkCommandBuffer cb2 = c->cmd[i];
         VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -340,7 +397,7 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = c->pimg[i], .subresourceRange = rng };
         F.CmdPipelineBarrier(cb2, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b1);
 
-        if (c->fx) {
+        if (c->fx) {                                           /* (mode 2 below reads this pass's output) */
             VkRenderPassBeginInfo rbq = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->rpm, .framebuffer = c->qfb[i],
                 .renderArea = { { 0, 0 }, c->in } };
             F.CmdBeginRenderPass(cb2, &rbq, VK_SUBPASS_CONTENTS_INLINE);
@@ -349,12 +406,24 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
             F.CmdDraw(cb2, 3, 1, 0, 0);
             F.CmdEndRenderPass(cb2);
         }
+        if (c->mode == 2) {                                    /* EASU: game (or FXAA) image -> full-size image */
+            VkRenderPassBeginInfo rbu = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->rpm, .framebuffer = c->ufb[i],
+                .renderArea = { { 0, 0 }, c->out } };
+            F.CmdBeginRenderPass(cb2, &rbu, VK_SUBPASS_CONTENTS_INLINE);
+            F.CmdBindPipeline(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pipee);
+            F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1, c->fx ? &c->dsq[i] : &c->ds[i], 0, NULL);
+            F.CmdPushConstants(cb2, c->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, easu);
+            F.CmdDraw(cb2, 3, 1, 0, 0);
+            F.CmdEndRenderPass(cb2);
+        }
         VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->rp, .framebuffer = c->fb[i],
             .renderArea = { { 0, 0 }, c->out } };
         F.CmdBeginRenderPass(cb2, &rbi, VK_SUBPASS_CONTENTS_INLINE);
         F.CmdBindPipeline(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pipe);
-        F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1, c->fx ? &c->dsq[i] : &c->ds[i], 0, NULL);
-        F.CmdPushConstants(cb2, c->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, vinfo);
+        F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1,
+                                c->mode == 2 ? &c->dsu[i] : (c->fx ? &c->dsq[i] : &c->ds[i]), 0, NULL);
+        if (c->mode == 2) F.CmdPushConstants(cb2, c->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, rcas);   /* RCAS: sharpen at full size */
+        else F.CmdPushConstants(cb2, c->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, vinfo);
         F.CmdDraw(cb2, 3, 1, 0, 0);
         F.CmdEndRenderPass(cb2);
 
@@ -414,6 +483,11 @@ int vkshim_sgsr_create(long device, long pci, long palloc, long psc, sg_f8 real,
     Sg *c = &g_sg[slot];
     memset(c, 0, sizeof *c);
     { const char *fe = getenv("LAS_FXAA"); c->fx = (fe && *fe == '1'); }
+    { const char *ff = getenv("LAS_FSR"), *rs = getenv("LAS_RCAS");
+      c->mode = (ff && *ff == '1') ? 2 : 1;
+      c->rcas = (rs && *rs) ? (float)atof(rs) : 0.2f;
+      if (c->rcas < 0.0f) c->rcas = 0.0f;
+      if (c->rcas > 2.0f) c->rcas = 2.0f; }
     c->used = 1; c->dev = dev; c->fmt = ci.imageFormat; c->in = ci.imageExtent; c->out = caps.currentExtent; c->family = family;
 
     VkSwapchainCreateInfoKHR rci = ci;
@@ -443,8 +517,9 @@ int vkshim_sgsr_create(long device, long pci, long palloc, long psc, sg_f8 real,
     }
     *(VkSwapchainKHR *)psc = sc;
     *res = VK_SUCCESS;
-    LOGI("sgsr: on: game renders %ux%u, screen %ux%u, %u images, format %d%s", c->in.width, c->in.height, c->out.width, c->out.height, n, (int)c->fmt,
-         c->fx ? ", FXAA before the upscale" : "");
+    LOGI("sgsr: on (%s): game renders %ux%u, screen %ux%u, %u images, format %d%s", c->mode == 2 ? "FSR 1 EASU+RCAS" : "SGSR 1",
+         c->in.width, c->in.height, c->out.width, c->out.height, n, (int)c->fmt, c->fx ? ", FXAA before the upscale" : "");
+    if (c->mode == 2) LOGI("sgsr: RCAS sharpness %.2f stops (0 = sharpest)", c->rcas);
     return 1;
 }
 
