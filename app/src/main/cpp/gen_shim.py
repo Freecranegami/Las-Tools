@@ -53,6 +53,21 @@ PROC = ("vkGetInstanceProcAddr", "vkGetDeviceProcAddr")
 CAS_HOOK = ("vkCreateSwapchainKHR", "vkQueuePresentKHR", "vkDestroySwapchainKHR", "vkGetDeviceQueue", "vkGetDeviceQueue2", "vkCreateDevice",
             "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceCapabilities2KHR", "vkGetSwapchainImagesKHR")
 # void commands that return the GPU identity: rewritten from the LAS_GPU_* environment (set by the app)
+# commands logged by diag.c (dynamic-resolution diagnostics); void ones get a tail wrapper
+DIAGV = {"vkCmdSetViewport": (4, "vkshim_diag_viewport(a1, a2, a3)"),
+         "vkCmdSetScissor": (4, "vkshim_diag_scissor(a1, a2, a3)"),
+         "vkCmdSetViewportWithCount": (3, "vkshim_diag_viewport_cnt(a1, a2)"),
+         "vkCmdSetViewportWithCountEXT": (3, "vkshim_diag_viewport_cnt(a1, a2)"),
+         "vkCmdBeginRenderPass": (3, "vkshim_diag_renderpass(a1)"),
+         "vkCmdBeginRenderPass2": (3, "vkshim_diag_renderpass(a1)"),
+         "vkCmdBeginRenderPass2KHR": (3, "vkshim_diag_renderpass(a1)"),
+         "vkCmdBeginRendering": (2, "vkshim_diag_rendering(a1)"),
+         "vkCmdBeginRenderingKHR": (2, "vkshim_diag_rendering(a1)"),
+         "vkCmdWriteTimestamp": (4, "vkshim_diag_ts_write()"),
+         "vkCmdWriteTimestamp2": (4, "vkshim_diag_ts_write()"),
+         "vkCmdWriteTimestamp2KHR": (4, "vkshim_diag_ts_write()")}
+DIAGR = {"vkCreateImage": "vkshim_diag_image(a1)", "vkCreateFramebuffer": "vkshim_diag_framebuffer(a1)",
+         "vkGetQueryPoolResults": "vkshim_diag_ts_read()"}
 SPOOF = {"vkGetPhysicalDeviceProperties": 0, "vkGetPhysicalDeviceProperties2": 1, "vkGetPhysicalDeviceProperties2KHR": 1}
 wrapped = [n for n in names if wrappable(n) and n not in PROC]
 wrapped_set = set(wrapped)
@@ -194,6 +209,9 @@ lines.append("extern void vkshim_cas_destroy(long, long, long, vkshim_f4v);")
 lines.append("extern void vkshim_cas_getqueue(long, long, long);")
 lines.append("extern void vkshim_cas_getqueue2(long, long, long);")
 lines.append("extern void vkshim_cas_device(long, long);")
+lines.append("extern void vkshim_diag_viewport(long, long, long); extern void vkshim_diag_viewport_cnt(long, long);")
+lines.append("extern void vkshim_diag_scissor(long, long, long); extern void vkshim_diag_renderpass(long); extern void vkshim_diag_rendering(long);")
+lines.append("extern void vkshim_diag_image(long); extern void vkshim_diag_framebuffer(long); extern void vkshim_diag_ts_write(void); extern void vkshim_diag_ts_read(void);")
 lines.append("typedef long (*vkshim_f3)(long, long, long);")
 lines.append("typedef long (*vkshim_f4)(long, long, long, long);")
 lines.append("extern long vkshim_sgsr_images(long, long, long, long, vkshim_f4);")
@@ -240,8 +258,15 @@ for i, n in enumerate(names):
             lines.append("    vkshim_after(%d, (int)r, 0);" % i)
             lines.append("    return r;")
         lines.append("}")
+    elif n in DIAGV:
+        lines.append("__attribute__((visibility(\"default\"))) void %s(long a0, long a1, long a2, long a3) {" % n)
+        lines.append("    %s;" % DIAGV[n][1])
+        lines.append("    ((vkshim_f4v)vkshim_table[%d])(a0, a1, a2, a3);" % i)
+        lines.append("}")
     elif n in wrapped_set:
         lines.append("__attribute__((visibility(\"default\"))) long %s(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {" % n)
+        if n in DIAGR:
+            lines.append("    %s;" % DIAGR[n])
         lines.append("    long r = ((vkshim_f8)vkshim_table[%d])(a0, a1, a2, a3, a4, a5, a6, a7);" % i)
         lines.append("    vkshim_after(%d, (int)r, %d);" % (i, COUNTED.get(n, 0)))
         lines.append("    return r;")
@@ -265,7 +290,7 @@ lines.append("__attribute__((visibility(\"default\"))) void *vkGetInstanceProcAd
 lines.append("__attribute__((visibility(\"default\"))) void *vkGetDeviceProcAddr(long, const char *);")
 lines.append("static void *const vkshim_wrap[VKSHIM_COUNT] = {")
 for n in names:
-    lines.append("    %s," % ("(void *)" + n if (n in wrapped_set or n in PROC or n in SPOOF or n in CAS_HOOK) else "0"))
+    lines.append("    %s," % ("(void *)" + n if (n in wrapped_set or n in PROC or n in SPOOF or n in CAS_HOOK or n in DIAGV) else "0"))
 lines.append("};")
 lines.append("static void *vkshim_lookup(const char *n, void *real) {")
 lines.append("    if (!real || !n) return real;")
