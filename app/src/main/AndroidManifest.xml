@@ -21,6 +21,8 @@
             </intent-filter>
         </activity>
 
+        <activity android:name=".FileManagerActivity" android:exported="false" android:label="File manager" />
+
         <activity
             android:name=".GuestActivity"
             android:process=":guest"

@@ -619,6 +619,8 @@ class MainActivity : Activity() {
                 btn("CPU spoof") { chooseCpu(out) },
                 btn("Device spoof") { chooseDevice(out) }))
             addView(row(
+                btn("File manager") { startActivity(Intent(this@MainActivity, FileManagerActivity::class.java)) }))
+            addView(row(
                 btn("Drivers") { chooseDriver(out) },
                 btn("Focus guard on/off") { toggleFocusGuard(out) }))
             addView(row(
