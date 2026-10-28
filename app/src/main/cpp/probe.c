@@ -938,8 +938,27 @@ static int32_t h_anw_h(ANativeWindow *w) {
     if (g_resh > 0 && r > 0) { if (r != g_realh) { g_realh = r; GLOG("resolution: window height %d reported to the game as %d", r, g_resh); } return g_resh; }
     return r;
 }
-static float rx(float v) { static int logged = 0; if (g_resw > 0 && g_realw > 0) { if (!logged) { logged = 1; GLOG("resolution: touch x scaled by %d/%d", g_resw, g_realw); } return v * g_resw / g_realw; } return v; }
-static float ry(float v) { return (g_resh > 0 && g_realh > 0) ? v * g_resh / g_realh : v; }
+static int g_keep = 0;                            /* LAS_KEEP=1: the picture keeps its ratio (black bars), so touches need the bars' offset too */
+static float touch_scale(void) {                  /* real pixels per game pixel */
+    float sx = (float)g_realw / (float)g_resw, sy = (float)g_realh / (float)g_resh;
+    return sx < sy ? sx : sy;
+}
+static float rx(float v) {
+    static int logged = 0;
+    if (g_resw <= 0 || g_realw <= 0) return v;
+    if (g_keep && g_realh > 0) {
+        float s = touch_scale(), off = ((float)g_realw - (float)g_resw * s) * 0.5f;
+        if (!logged) { logged = 1; GLOG("resolution: touch x mapped for a kept ratio (scale %.3f, bars %.0f px)", s, off); }
+        return (v - off) / s;
+    }
+    if (!logged) { logged = 1; GLOG("resolution: touch x scaled by %d/%d", g_resw, g_realw); }
+    return v * g_resw / g_realw;
+}
+static float ry(float v) {
+    if (g_resh <= 0 || g_realh <= 0) return v;
+    if (g_keep && g_realw > 0) { float s = touch_scale(), off = ((float)g_realh - (float)g_resh * s) * 0.5f; return (v - off) / s; }
+    return v * g_resh / g_realh;
+}
 static float h_ame_x(const AInputEvent *e, size_t i) { return rx(AMotionEvent_getX(e, i)); }
 static float h_ame_y(const AInputEvent *e, size_t i) { return ry(AMotionEvent_getY(e, i)); }
 static float h_ame_rx(const AInputEvent *e, size_t i) { return rx(AMotionEvent_getRawX(e, i)); }
@@ -1288,7 +1307,7 @@ Java_com_freecrane_adrenotest_Native_installFileHooks(JNIEnv *env, jobject thiz,
     { const char *fk = getenv("LAS_FAKE_DIR"); if (fk) strncpy(g_fake, fk, sizeof g_fake - 1); }
     GLOG("file hooks: Android/data and Android/obb of %s -> %s; fake dir %s", g_pkg, g_ext, g_fake);
     { const char *lt = getenv("LAS_LIGHT"); g_light = (lt && *lt == '1'); }
-    { const char *rw = getenv("LAS_RES_W"), *rh = getenv("LAS_RES_H"); g_resw = rw ? atoi(rw) : 0; g_resh = rh ? atoi(rh) : 0; if (g_resw <= 0 || g_resh <= 0) g_resw = g_resh = 0; }
+    { const char *rw = getenv("LAS_RES_W"), *rh = getenv("LAS_RES_H"); g_resw = rw ? atoi(rw) : 0; g_resh = rh ? atoi(rh) : 0; { const char *kp = getenv("LAS_KEEP"); g_keep = (kp && *kp == '1'); } if (g_resw <= 0 || g_resh <= 0) g_resw = g_resh = 0; }
     if (!g_light) errpipe_install();
     GLOG("file hooks: light mode %s", g_light ? "ON (diagnostics off)" : "off");
     pthread_t t;

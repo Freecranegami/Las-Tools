@@ -525,6 +525,14 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun toggleStretch(out: TextView) {
+        val on = !Tweaks.stretch(this)
+        Tweaks.setStretch(this, on)
+        out.text = if (on) "Stretch to fit ON: a picture with a different ratio than the screen is stretched over the whole screen. Applies the next time the game starts."
+                   else "Stretch to fit OFF: the picture keeps its ratio, with black bars at the sides or top and bottom (for a Resolution with another ratio, or a game resolution of another ratio). " +
+                        "Applies the next time the game starts."
+    }
+
     private fun toggleFxaa(out: TextView) {
         val on = !Tweaks.fxaa(this)
         Tweaks.setFxaa(this, on)
@@ -621,7 +629,8 @@ class MainActivity : Activity() {
                 btn("Upscaler (SGSR / FSR)") { chooseUpscaler(out) },
                 btn("RCAS sharpness") { chooseRcas(out) }))
             addView(row(
-                btn("FXAA on/off") { toggleFxaa(out) }))
+                btn("FXAA on/off") { toggleFxaa(out) },
+                btn("Stretch to fit on/off") { toggleStretch(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))

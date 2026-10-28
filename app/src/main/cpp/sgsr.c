@@ -22,6 +22,7 @@
 #include "sgsr_spv.h"
 #include "fxaa_spv.h"
 #include "fsr_spv.h"
+#include "scale_spv.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "GuestHost", __VA_ARGS__)
 extern void *vkshim_real_proc(const char *name);
@@ -108,6 +109,7 @@ typedef struct {
     int fx; VkImage qimg[MAXIMG]; VkDeviceMemory qmem[MAXIMG]; VkImageView qview[MAXIMG]; VkFramebuffer qfb[MAXIMG];
     VkDescriptorSet dsq[MAXIMG]; VkRenderPass rpm; VkPipeline pipefx; VkShaderModule fvs, ffs;
     /* FSR 1 (mode 2): game image [-> FXAA] -> EASU -> full-size image -> RCAS -> swapchain image */
+    VkRect2D rect;                       /* where the picture goes on the screen (smaller than the screen when the ratio is kept) */
     int mode; float rcas; VkImage uimg[MAXIMG]; VkDeviceMemory umem[MAXIMG]; VkImageView uview[MAXIMG]; VkFramebuffer ufb[MAXIMG];
     VkDescriptorSet dsu[MAXIMG]; VkPipeline pipee; VkShaderModule efs;
     unsigned long presents;
@@ -125,8 +127,19 @@ static Sg *find(VkSwapchainKHR sc) {
 
 int vkshim_sgsr_enabled(void) {
     static int s = -1;
-    if (s < 0) { const char *e = getenv("LAS_SGSR"), *f = getenv("LAS_FSR"); s = ((e && *e == '1') || (f && *f == '1')) ? 1 : 0; }
+    if (s < 0) {
+        const char *e = getenv("LAS_SGSR"), *f = getenv("LAS_FSR"), *k = getenv("LAS_KEEP"), *w = getenv("LAS_RES_W");
+        s = ((e && *e == '1') || (f && *f == '1') || (k && *k == '1' && w && atoi(w) > 0)) ? 1 : 0;
+    }
     return s;
+}
+
+/* 1 = SGSR, 2 = FSR 1, 3 = plain scaling (only used to keep the picture's ratio when no upscaler is chosen) */
+static int sgsr_mode(void) {
+    const char *f = getenv("LAS_FSR"), *e = getenv("LAS_SGSR");
+    if (f && *f == '1') return 2;
+    if (e && *e == '1') return 1;
+    return 3;
 }
 
 /* frees everything except the real swapchain itself */
@@ -179,15 +192,15 @@ static uint32_t pick_memtype(VkDevice dev, uint32_t bits) {
 
 #define ST(what, call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) { LOGI("sgsr: %s failed (%d)", what, (int)r_); return -1; } } while (0)
 
-static VkResult mk_pipe(Sg *c, VkShaderModule vs, VkShaderModule fs, VkRenderPass rp, VkExtent2D ext, VkPipeline *out) {
+static VkResult mk_pipe(Sg *c, VkShaderModule vs, VkShaderModule fs, VkRenderPass rp, VkRect2D area, VkPipeline *out) {
     VkPipelineShaderStageCreateInfo st[2] = {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main" },
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main" } };
     VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
     VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
-    VkViewport vp = { 0, 0, (float)ext.width, (float)ext.height, 0, 1 };
-    VkRect2D sc = { { 0, 0 }, ext };
+    VkViewport vp = { (float)area.offset.x, (float)area.offset.y, (float)area.extent.width, (float)area.extent.height, 0, 1 };
+    VkRect2D sc = area;
     VkPipelineViewportStateCreateInfo vs2 = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &sc };
     VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
@@ -210,6 +223,7 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
     VkDevice d = c->dev;
     uint32_t n = c->n;
     VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkClearValue black; memset(&black, 0, sizeof black);
     for (uint32_t i = 0; i < n; i++) {
         VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = c->fmt,
             .extent = { c->in.width, c->in.height, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -258,7 +272,7 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
     ST("create sampler", F.CreateSampler(d, &sci, NULL, &c->samp));
 
     VkAttachmentDescription ad = { .format = c->fmt, .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,      /* black bars when the ratio is kept */
         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR };
     VkAttachmentReference ar = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
@@ -340,28 +354,35 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
     }
 
     VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-    if (c->mode == 2) {
+    VkRect2D full = { { 0, 0 }, c->out };
+    if (c->mode == 3) {
+        smi.codeSize = sizeof sgsr_vs_spv; smi.pCode = sgsr_vs_spv;
+        ST("create vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->vs));
+        smi.codeSize = sizeof scale_fs_spv; smi.pCode = scale_fs_spv;
+        ST("create scale shader", F.CreateShaderModule(d, &smi, NULL, &c->fs));
+        ST("create scale pipeline", mk_pipe(c, c->vs, c->fs, c->rp, c->rect, &c->pipe));
+    } else if (c->mode == 2) {
         smi.codeSize = sizeof fsr_vs_spv; smi.pCode = fsr_vs_spv;
         ST("create vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->vs));
         smi.codeSize = sizeof fsr_rcas_fs_spv; smi.pCode = fsr_rcas_fs_spv;
         ST("create RCAS shader", F.CreateShaderModule(d, &smi, NULL, &c->fs));
         smi.codeSize = sizeof fsr_easu_fs_spv; smi.pCode = fsr_easu_fs_spv;
         ST("create EASU shader", F.CreateShaderModule(d, &smi, NULL, &c->efs));
-        ST("create RCAS pipeline", mk_pipe(c, c->vs, c->fs, c->rp, c->out, &c->pipe));
-        ST("create EASU pipeline", mk_pipe(c, c->vs, c->efs, c->rpm, c->out, &c->pipee));
+        ST("create RCAS pipeline", mk_pipe(c, c->vs, c->fs, c->rp, full, &c->pipe));
+        ST("create EASU pipeline", mk_pipe(c, c->vs, c->efs, c->rpm, c->rect, &c->pipee));
     } else {
         smi.codeSize = sizeof sgsr_vs_spv; smi.pCode = sgsr_vs_spv;
         ST("create vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->vs));
         smi.codeSize = sizeof sgsr_fs_spv; smi.pCode = sgsr_fs_spv;
         ST("create fragment shader", F.CreateShaderModule(d, &smi, NULL, &c->fs));
-        ST("create pipeline", mk_pipe(c, c->vs, c->fs, c->rp, c->out, &c->pipe));
+        ST("create pipeline", mk_pipe(c, c->vs, c->fs, c->rp, c->rect, &c->pipe));
     }
     if (c->fx) {
         smi.codeSize = sizeof fxaa_vs_spv; smi.pCode = fxaa_vs_spv;
         ST("create FXAA vertex shader", F.CreateShaderModule(d, &smi, NULL, &c->fvs));
         smi.codeSize = sizeof fxaa_fs_spv; smi.pCode = fxaa_fs_spv;
         ST("create FXAA fragment shader", F.CreateShaderModule(d, &smi, NULL, &c->ffs));
-        ST("create FXAA pipeline", mk_pipe(c, c->fvs, c->ffs, c->rpm, c->in, &c->pipefx));
+        ST("create FXAA pipeline", mk_pipe(c, c->fvs, c->ffs, c->rpm, (VkRect2D){ { 0, 0 }, c->in }, &c->pipefx));
     }
 
     VkCommandPoolCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = c->family };
@@ -376,8 +397,9 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
     /* FSR 1 constants, the same as FsrEasuCon / FsrRcasCon in ffx_fsr1.h (input size = viewport size here) */
     uint32_t easu[16], rcas[4] = { 0, 0, 0, 0 };
     {
-        float iw = (float)c->in.width, ih = (float)c->in.height, ow = (float)c->out.width, oh = (float)c->out.height;
-        float e[16] = { iw / ow, ih / oh, 0.5f * iw / ow - 0.5f, 0.5f * ih / oh - 0.5f,
+        float iw = (float)c->in.width, ih = (float)c->in.height, ow = (float)c->rect.extent.width, oh = (float)c->rect.extent.height;
+        float ox = (float)c->rect.offset.x, oy = (float)c->rect.offset.y;      /* EASU draws into the rect; the pixel position is made rect-relative here */
+        float e[16] = { iw / ow, ih / oh, 0.5f * iw / ow - 0.5f - ox * iw / ow, 0.5f * ih / oh - 0.5f - oy * ih / oh,
                         1.0f / iw, 1.0f / ih, 1.0f / iw, -1.0f / ih,
                         -1.0f / iw, 2.0f / ih, 1.0f / iw, 2.0f / ih,
                         0.0f, 4.0f / ih, 0.0f, 0.0f };
@@ -399,7 +421,7 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
 
         if (c->fx) {                                           /* (mode 2 below reads this pass's output) */
             VkRenderPassBeginInfo rbq = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->rpm, .framebuffer = c->qfb[i],
-                .renderArea = { { 0, 0 }, c->in } };
+                .renderArea = { { 0, 0 }, c->in }, .clearValueCount = 1, .pClearValues = &black };
             F.CmdBeginRenderPass(cb2, &rbq, VK_SUBPASS_CONTENTS_INLINE);
             F.CmdBindPipeline(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pipefx);
             F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1, &c->ds[i], 0, NULL);
@@ -408,7 +430,7 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
         }
         if (c->mode == 2) {                                    /* EASU: game (or FXAA) image -> full-size image */
             VkRenderPassBeginInfo rbu = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->rpm, .framebuffer = c->ufb[i],
-                .renderArea = { { 0, 0 }, c->out } };
+                .renderArea = { { 0, 0 }, c->out }, .clearValueCount = 1, .pClearValues = &black };
             F.CmdBeginRenderPass(cb2, &rbu, VK_SUBPASS_CONTENTS_INLINE);
             F.CmdBindPipeline(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pipee);
             F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1, c->fx ? &c->dsq[i] : &c->ds[i], 0, NULL);
@@ -417,7 +439,7 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
             F.CmdEndRenderPass(cb2);
         }
         VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->rp, .framebuffer = c->fb[i],
-            .renderArea = { { 0, 0 }, c->out } };
+            .renderArea = { { 0, 0 }, c->out }, .clearValueCount = 1, .pClearValues = &black };
         F.CmdBeginRenderPass(cb2, &rbi, VK_SUBPASS_CONTENTS_INLINE);
         F.CmdBindPipeline(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pipe);
         F.CmdBindDescriptorSets(cb2, VK_PIPELINE_BIND_POINT_GRAPHICS, c->pl, 0, 1,
@@ -469,8 +491,14 @@ int vkshim_sgsr_create(long device, long pci, long palloc, long psc, sg_f8 real,
     else if (!phys) why = "physical device unknown";
     else if (!fok) why = "no queue seen yet";
     if (!why && F.GetCaps(phys, ci.surface, &caps) != VK_SUCCESS) why = "surface size unavailable";
-    if (!why && (caps.currentExtent.width == 0xFFFFFFFFu || caps.currentExtent.width <= ci.imageExtent.width ||
-                 caps.currentExtent.height <= ci.imageExtent.height)) why = "the game's swapchain is not smaller than the screen";
+    int wantMode = sgsr_mode();
+    if (!why && caps.currentExtent.width == 0xFFFFFFFFu) why = "surface size unknown";
+    if (!why && caps.currentExtent.width == ci.imageExtent.width && caps.currentExtent.height == ci.imageExtent.height)
+        why = "the game's swapchain is as big as the screen";
+    if (!why && wantMode == 3 && (uint64_t)ci.imageExtent.width * caps.currentExtent.height == (uint64_t)ci.imageExtent.height * caps.currentExtent.width)
+        why = "the game's picture already has the screen's ratio";
+    if (!why && wantMode != 3 && (caps.currentExtent.width < ci.imageExtent.width || caps.currentExtent.height < ci.imageExtent.height))
+        why = "the game's swapchain is bigger than the screen";
     int slot = -1;
     if (!why) {
         pthread_mutex_lock(&g_mu);
@@ -484,10 +512,21 @@ int vkshim_sgsr_create(long device, long pci, long palloc, long psc, sg_f8 real,
     memset(c, 0, sizeof *c);
     { const char *fe = getenv("LAS_FXAA"); c->fx = (fe && *fe == '1'); }
     { const char *ff = getenv("LAS_FSR"), *rs = getenv("LAS_RCAS");
-      c->mode = (ff && *ff == '1') ? 2 : 1;
+      c->mode = wantMode; (void)ff;
       c->rcas = (rs && *rs) ? (float)atof(rs) : 0.2f;
       if (c->rcas < 0.0f) c->rcas = 0.0f;
       if (c->rcas > 2.0f) c->rcas = 2.0f; }
+    c->rect = (VkRect2D){ { 0, 0 }, caps.currentExtent };
+    { const char *kp = getenv("LAS_KEEP");
+      if (kp && *kp == '1') {                                   /* keep the game's ratio: fit it inside the screen, black bars around */
+          float sx = (float)caps.currentExtent.width / (float)ci.imageExtent.width, sy = (float)caps.currentExtent.height / (float)ci.imageExtent.height;
+          float sc = sx < sy ? sx : sy;
+          uint32_t rw = (uint32_t)((float)ci.imageExtent.width * sc + 0.5f), rh = (uint32_t)((float)ci.imageExtent.height * sc + 0.5f);
+          if (rw > caps.currentExtent.width) rw = caps.currentExtent.width;
+          if (rh > caps.currentExtent.height) rh = caps.currentExtent.height;
+          c->rect.extent.width = rw; c->rect.extent.height = rh;
+          c->rect.offset.x = (int32_t)((caps.currentExtent.width - rw) / 2); c->rect.offset.y = (int32_t)((caps.currentExtent.height - rh) / 2);
+      } }
     c->used = 1; c->dev = dev; c->fmt = ci.imageFormat; c->in = ci.imageExtent; c->out = caps.currentExtent; c->family = family;
 
     VkSwapchainCreateInfoKHR rci = ci;
@@ -517,8 +556,10 @@ int vkshim_sgsr_create(long device, long pci, long palloc, long psc, sg_f8 real,
     }
     *(VkSwapchainKHR *)psc = sc;
     *res = VK_SUCCESS;
-    LOGI("sgsr: on (%s): game renders %ux%u, screen %ux%u, %u images, format %d%s", c->mode == 2 ? "FSR 1 EASU+RCAS" : "SGSR 1",
+    LOGI("sgsr: on (%s): game renders %ux%u, screen %ux%u, %u images, format %d%s", c->mode == 2 ? "FSR 1 EASU+RCAS" : (c->mode == 1 ? "SGSR 1" : "plain scaling"),
          c->in.width, c->in.height, c->out.width, c->out.height, n, (int)c->fmt, c->fx ? ", FXAA before the upscale" : "");
+    LOGI("sgsr: picture placed at %d,%d size %ux%u%s", c->rect.offset.x, c->rect.offset.y, c->rect.extent.width, c->rect.extent.height,
+         (c->rect.extent.width == c->out.width && c->rect.extent.height == c->out.height) ? " (fills the screen)" : " (ratio kept, black bars)");
     if (c->mode == 2) LOGI("sgsr: RCAS sharpness %.2f stops (0 = sharpest)", c->rcas);
     return 1;
 }

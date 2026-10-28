@@ -42,6 +42,11 @@ object Tweaks {
     fun setRcasPercent(ctx: Context, v: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("rcas_pct", v.coerceIn(0, 100)).commit() }
     fun rcasStops(pct: Int): Float = (100 - pct.coerceIn(0, 100)) / 100f * 2f
 
+    // Stretch to fit (default on): a game picture whose ratio differs from the screen's is stretched over the whole screen.
+    // Off: the ratio is kept and black bars fill the rest (the picture then goes through the shim's own full-size swapchain).
+    fun stretch(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("stretch", true)
+    fun setStretch(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("stretch", on).commit() }
+
     // Custom resolution: the game is told the screen is this size (window size queries, Vulkan surface size, touch
     // positions) so it renders smaller and the system scales the picture up. 0x0 = the screen's own size.
     fun resW(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("res_w", 0)
@@ -68,9 +73,10 @@ object Tweaks {
             val up = upscaler(ctx)
             Os.setenv("LAS_SGSR", if (up == 1) "1" else "0", true)
             Os.setenv("LAS_FSR", if (up == 2) "1" else "0", true)
+            Os.setenv("LAS_KEEP", if (stretch(ctx)) "0" else "1", true)
             Os.setenv("LAS_RCAS", rcasStops(rcasPercent(ctx)).toString(), true)
             Os.setenv("LAS_CAS", if (c.strength > 0f) c.strength.toString() else "0", true)
-            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; FXAA ${if (fxaa(ctx)) "on" else "off"}")
+            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; ${if (stretch(ctx)) "stretch to fit" else "keep ratio"}; FXAA ${if (fxaa(ctx)) "on" else "off"}")
         } catch (t: Throwable) {
             Log.w("GuestHost", "tweaks failed: $t")
         }
