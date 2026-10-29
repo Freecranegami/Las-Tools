@@ -32,13 +32,19 @@ object GuestLog {
     )
 
     // what the game asks about the device: always shown first, never cut
-    private val identityTokens = listOf("native-hw", "native-prop", "native-gl", "vkshim: GPU", "vkshim: driver", "GPU spoof", "tweaks:", "cas:", "sgsr:", "fxaa:", "resolution:", "diag:", "driver in use", "file hooks", "native-model")
+    private val identityTokens = listOf("native-hw", "native-prop", "native-gl", "vkshim: GPU", "vkshim: driver", "GPU spoof", "tweaks:", "cas:", "sgsr:", "fxaa:", "resolution:", "driver in use", "file hooks", "native-model")
 
     private val important = listOf(
         " E ", " F ", "GuestHost", "GuestGame", "Unity", "JNI", "Abort", "signal", "vkshim",
         "CANNOT", "dlopen", "linker", "libvulkan", "libvkshim", "Vulkan", "vulkan",
         "clns", "native-fail", "native-open", "crash-info", "crash-regs", "crash-code", "read-fix", "crash-mem", "crash-match", "crash-recent", "native-asset", "native-hw", "native-prop", "native-gl", "lifecycle", "native-stderr", "native-ioctl", "vkshim: kgsl", "vkshim: mem", "file hooks", "snap[", "native thread", "asset packs", "split names", "asset", "splits on disk", "FindClass", "pm ", "play probe", "ctx probe", "Fatal", "FATAL", "Exception"
     )
+
+    // "diag: image WxH": only the ones that could be a render target (at least 600 wide)
+    private fun it_big(l: String): Boolean {
+        val m = Regex("diag: image (\\d+)x(\\d+)").find(l) ?: return false
+        return m.groupValues[1].toInt() >= 600 && m.groupValues[2].toInt() >= 300
+    }
 
     private val frameRe = Regex("#(\\d+) pc ")
 
@@ -92,12 +98,24 @@ object GuestLog {
             kept.add(if (c > 1) firstLine[key] + "   [x$c]" else firstLine[key]!!)
         }
 
+        // dynamic-resolution diagnostics: own block, so they are neither capped with the identity lines
+        // nor lost in the trim. Texture-sized "image" lines are summarised, not listed.
+        val diagAll = kept.filter { it.contains("diag: ") }
+        kept.removeAll { it.contains("diag: ") }
+        val diag = diagAll.filter { !it.contains("diag: image ") && !it.contains("timestamps written") }.take(120) +
+            diagAll.filter { it.contains("timestamps written") }.takeLast(15)
+        val diagImages = diagAll.count { it.contains("diag: image ") }
+        val diagBig = diagAll.filter { l -> it_big(l) }.take(40)
         val identity = kept.filter { l -> identityTokens.any { l.contains(it) } }.take(90)
         kept.removeAll { l -> identityTokens.any { l.contains(it) } }
+        val diagBlock = if (diagAll.isEmpty()) "" else
+            "--- diag: scene sizes and GPU timers ($diagImages image sizes not listed) ---\n" +
+            diag.joinToString("\n") + "\n" + (if (diagBig.isEmpty()) "" else "--- large images ---\n" + diagBig.joinToString("\n") + "\n") +
+            "--- end of diag ---\n"
         val header = if (start >= 0) "[log since the last game launch, from the $source]"
                      else "[no game launch found, showing the recent log, from the $source]"
         val idBlock = "--- device identity: what the game read and what it was told ---\n" +
-            (if (identity.isEmpty()) "(nothing logged)\n" else identity.joinToString("\n") + "\n") + "--- end of identity ---\n"
+            (if (identity.isEmpty()) "(nothing logged)\n" else identity.joinToString("\n") + "\n") + "--- end of identity ---\n" + diagBlock
         var text = header + "\n" + idBlock + kept.joinToString("\n")
         if (text.length > 22000) {
             // the lines right before the first fatal signal are the game's own last words
