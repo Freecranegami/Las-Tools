@@ -540,6 +540,13 @@ class MainActivity : Activity() {
                    else "FXAA anti-aliasing OFF. Applies the next time the game starts."
     }
 
+    private fun toggleDrs(out: TextView) {
+        val on = !Tweaks.drsLock(this)
+        Tweaks.setDrsLock(this, on)
+        out.text = if (on) "Lock render size ON: the game's dynamic resolution is kept at its largest step, so the picture stays sharp when you look around. The frame rate can drop in heavy scenes. Applies the next time the game starts. If the picture breaks or goes black, turn it off."
+                   else "Lock render size OFF: the game changes its own resolution. Applies the next time the game starts."
+    }
+
     private fun chooseCas(out: TextView) {
         val labels = Tweaks.casLevels.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
@@ -633,6 +640,8 @@ class MainActivity : Activity() {
             addView(row(
                 btn("FXAA on/off") { toggleFxaa(out) },
                 btn("Stretch to fit on/off") { toggleStretch(out) }))
+            addView(row(
+                btn("Lock render size on/off") { toggleDrs(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))
