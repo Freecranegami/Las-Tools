@@ -73,6 +73,7 @@ object Tweaks {
             val rw = resW(ctx); val rh = resH(ctx)
             Os.setenv("LAS_RES_W", if (rw > 0 && rh > 0) rw.toString() else "0", true)
             Os.setenv("LAS_RES_H", if (rw > 0 && rh > 0) rh.toString() else "0", true)
+            if (Lsfg.installed(ctx)) Os.setenv("LAS_LSFG_DLL", Lsfg.dll(ctx).path, true)
             Os.setenv("LAS_DRS", if (drsLock(ctx)) "1" else "0", true)
             Os.setenv("LAS_FXAA", if (fxaa(ctx)) "1" else "0", true)
             val up = upscaler(ctx)

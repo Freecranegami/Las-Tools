@@ -62,6 +62,7 @@ class MainActivity : Activity() {
 
     private val pickRequest = 1001
     private val driverRequest = 1002
+    private val lsfgRequest = 1003
 
     private var surface: Surface? = null
     private lateinit var outView: TextView
@@ -163,6 +164,17 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == lsfgRequest) {
+            val u = if (resultCode == RESULT_OK) data?.data else null
+            if (u != null) {
+                outView.text = "Importing Lossless.dll and checking it..."
+                Thread {
+                    val msg = Lsfg.import(this, u)
+                    runOnUiThread { outView.text = msg }
+                }.start()
+            }
+            return
+        }
         if (requestCode == driverRequest) {
             val u = if (resultCode == RESULT_OK) data?.data else null
             if (u != null) {
@@ -540,6 +552,24 @@ class MainActivity : Activity() {
                    else "FXAA anti-aliasing OFF. Applies the next time the game starts."
     }
 
+    private fun importLossless(out: TextView) {
+        out.text = "Pick Lossless.dll from your copy of Lossless Scaling (Steam: steamapps/common/Lossless Scaling/Lossless.dll). " +
+            "It is only read on this phone to get the frame generation shaders; the app does not include it."
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        startActivityForResult(i, lsfgRequest)
+    }
+
+    private fun checkLossless(out: TextView) {
+        out.text = "Checking Lossless.dll..."
+        Thread {
+            val msg = Lsfg.check(this)
+            runOnUiThread { out.text = msg }
+        }.start()
+    }
+
     private fun toggleDrs(out: TextView) {
         val on = !Tweaks.drsLock(this)
         Tweaks.setDrsLock(this, on)
@@ -642,6 +672,9 @@ class MainActivity : Activity() {
                 btn("Stretch to fit on/off") { toggleStretch(out) }))
             addView(row(
                 btn("Lock render size on/off") { toggleDrs(out) }))
+            addView(row(
+                btn("Import Lossless.dll") { importLossless(out) },
+                btn("Check Lossless.dll") { checkLossless(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))
