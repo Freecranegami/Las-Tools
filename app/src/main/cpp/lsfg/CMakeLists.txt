@@ -13,7 +13,7 @@ set_target_properties(peparse PROPERTIES CXX_STANDARD 17)
 
 add_subdirectory(framegen EXCLUDE_FROM_ALL)
 
-add_library(lsfgcore SHARED probe.cpp glue.cpp extract.cpp trans.cpp)
+add_library(lsfgcore SHARED probe.cpp bridge.cpp extract.cpp trans.cpp)
 set_target_properties(lsfgcore PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 target_include_directories(lsfgcore PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(lsfgcore PRIVATE peparse dxbc lsfg-vk-framegen log nativewindow android)

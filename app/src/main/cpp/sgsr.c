@@ -180,7 +180,7 @@ static int lg_load(void) {
         *(void **)&LG.del = dlsym(h, "las_lsfg_delete");
     }
     if (!h || !LG.init || !LG.ctx || !LG.present || !LG.del) {
-        LOGI("lsfg: off, can't load the frame generation library (%s): %s", p ? p : "no path", h ? "missing functions" : dlerror());
+        LOGI("lsfg: off, can't load the frame generation library (%s): %s", p ? p : "no path", h ? (!LG.init ? "no las_lsfg_init" : !LG.ctx ? "no las_lsfg_context" : !LG.present ? "no las_lsfg_present" : "no las_lsfg_delete") : dlerror());
         LG.state = -1;
         return 0;
     }
