@@ -1,6 +1,7 @@
 package com.freecrane.adrenotest
 
 import android.content.Context
+import java.io.File
 import android.system.Os
 import android.util.Log
 
@@ -42,6 +43,10 @@ object Tweaks {
     fun setRcasPercent(ctx: Context, v: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("rcas_pct", v.coerceIn(0, 100)).commit() }
     fun rcasStops(pct: Int): Float = (100 - pct.coerceIn(0, 100)) / 100f * 2f
 
+    // Frame generation (Lossless Scaling's algorithm, needs the user's Lossless.dll). Default off.
+    fun lsfg(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("lsfg", false)
+    fun setLsfg(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("lsfg", on).commit() }
+
     // Lock the game's dynamic resolution (its scene size is kept at the largest step). Default off.
     fun drsLock(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("drs_lock", false)
     fun setDrsLock(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("drs_lock", on).commit() }
@@ -74,6 +79,8 @@ object Tweaks {
             Os.setenv("LAS_RES_W", if (rw > 0 && rh > 0) rw.toString() else "0", true)
             Os.setenv("LAS_RES_H", if (rw > 0 && rh > 0) rh.toString() else "0", true)
             if (Lsfg.installed(ctx)) Os.setenv("LAS_LSFG_DLL", Lsfg.dll(ctx).path, true)
+            Os.setenv("LAS_LSFG", if (lsfg(ctx) && Lsfg.installed(ctx)) "1" else "0", true)
+            Os.setenv("LAS_LSFG_LIB", File(ctx.applicationInfo.nativeLibraryDir, "liblsfgcore.so").path, true)
             Os.setenv("LAS_DRS", if (drsLock(ctx)) "1" else "0", true)
             Os.setenv("LAS_FXAA", if (fxaa(ctx)) "1" else "0", true)
             val up = upscaler(ctx)
@@ -82,7 +89,7 @@ object Tweaks {
             Os.setenv("LAS_KEEP", if (stretch(ctx)) "0" else "1", true)
             Os.setenv("LAS_RCAS", rcasStops(rcasPercent(ctx)).toString(), true)
             Os.setenv("LAS_CAS", if (c.strength > 0f) c.strength.toString() else "0", true)
-            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; ${if (stretch(ctx)) "stretch to fit" else "keep ratio"}; FXAA ${if (fxaa(ctx)) "on" else "off"}; steady resolution ${if (drsLock(ctx)) "on" else "off"}")
+            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; ${if (stretch(ctx)) "stretch to fit" else "keep ratio"}; FXAA ${if (fxaa(ctx)) "on" else "off"}; steady resolution ${if (drsLock(ctx)) "on" else "off"}; frame generation ${if (lsfg(ctx) && Lsfg.installed(ctx)) "on" else "off"}")
         } catch (t: Throwable) {
             Log.w("GuestHost", "tweaks failed: $t")
         }

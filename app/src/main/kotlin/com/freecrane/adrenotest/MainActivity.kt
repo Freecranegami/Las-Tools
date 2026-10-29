@@ -570,6 +570,16 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun toggleLsfg(out: TextView) {
+        if (!Lsfg.installed(this)) { out.text = "Import Lossless.dll first (the button above)."; return }
+        val on = !Tweaks.lsfg(this)
+        Tweaks.setLsfg(this, on)
+        out.text = if (on) "Frame generation ON (2x): an in-between frame is made for every game frame, using the shaders from your Lossless.dll. " +
+                "It costs GPU time, so it may help less when the game is already GPU-bound, and it adds about one frame of delay. " +
+                "Applies the next time the game starts. If the picture breaks or the game stalls, turn it off and send the Guest log."
+                   else "Frame generation OFF. Applies the next time the game starts."
+    }
+
     private fun toggleDrs(out: TextView) {
         val on = !Tweaks.drsLock(this)
         Tweaks.setDrsLock(this, on)
@@ -675,6 +685,8 @@ class MainActivity : Activity() {
             addView(row(
                 btn("Import Lossless.dll") { importLossless(out) },
                 btn("Check Lossless.dll") { checkLossless(out) }))
+            addView(row(
+                btn("Frame generation on/off") { toggleLsfg(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))

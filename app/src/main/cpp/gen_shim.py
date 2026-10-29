@@ -68,7 +68,8 @@ DIAGV = {"vkCmdSetViewport": (4, "vkshim_diag_viewport(a1, a2, a3)"),
          "vkCmdWriteTimestamp2KHR": (4, "vkshim_diag_ts_write()")}
 DIAGR = {"vkCreateImage": "vkshim_diag_image(a1)", "vkCreateFramebuffer": "vkshim_diag_framebuffer(a1)",
          "vkGetQueryPoolResults": "vkshim_diag_ts_read()"}
-DIAGP = {"vkCreateQueryPool": "vkshim_diag_qpool(a1, a3, r)",
+DIAGP = {"vkCreateInstance": "vkshim_lsfg_instance(a2, r)",
+         "vkCreateQueryPool": "vkshim_diag_qpool(a1, a3, r)",
          "vkGetQueryPoolResults": "vkshim_diag_qresults(a1, a2, a3, a4, a5, a6, a7, r)"}
 SPOOF = {"vkGetPhysicalDeviceProperties": 0, "vkGetPhysicalDeviceProperties2": 1, "vkGetPhysicalDeviceProperties2KHR": 1}
 wrapped = [n for n in names if wrappable(n) and n not in PROC]
@@ -215,6 +216,7 @@ lines.append("extern void vkshim_diag_viewport(long, long, long); extern void vk
 lines.append("extern void vkshim_diag_scissor(long, long, long); extern void vkshim_diag_renderpass(long); extern void vkshim_diag_rendering(long);")
 lines.append("extern void vkshim_diag_image(long); extern void vkshim_diag_framebuffer(long); extern void vkshim_diag_ts_write(void); extern void vkshim_diag_ts_read(void);")
 lines.append("extern void vkshim_diag_qpool(long, long, long); extern void vkshim_diag_qresults(long, long, long, long, long, long, long, long);")
+lines.append("extern void vkshim_lsfg_instance(long, long); extern void vkshim_lsfg_predevice(long, long);")
 lines.append("typedef long (*vkshim_f3)(long, long, long);")
 lines.append("typedef long (*vkshim_f4)(long, long, long, long);")
 lines.append("extern long vkshim_sgsr_images(long, long, long, long, vkshim_f4);")
@@ -256,6 +258,7 @@ for i, n in enumerate(names):
             lines.append("    return r;")
         elif n == "vkCreateDevice":
             lines.append("%s long %s(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {" % (e, n))
+            lines.append("    vkshim_lsfg_predevice(a0, a1);")
             lines.append("    long r = ((vkshim_f8)vkshim_table[%d])(a0, a1, a2, a3, a4, a5, a6, a7);" % i)
             lines.append("    if (r == 0 && a3) vkshim_cas_device(a0, *(long *)a3);")
             lines.append("    vkshim_after(%d, (int)r, 0);" % i)
