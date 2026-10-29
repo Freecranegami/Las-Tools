@@ -82,7 +82,7 @@ object Tweaks {
             Os.setenv("LAS_KEEP", if (stretch(ctx)) "0" else "1", true)
             Os.setenv("LAS_RCAS", rcasStops(rcasPercent(ctx)).toString(), true)
             Os.setenv("LAS_CAS", if (c.strength > 0f) c.strength.toString() else "0", true)
-            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; ${if (stretch(ctx)) "stretch to fit" else "keep ratio"}; FXAA ${if (fxaa(ctx)) "on" else "off"}; dynamic resolution ${if (drsLock(ctx)) "locked" else "free"}")
+            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; ${if (stretch(ctx)) "stretch to fit" else "keep ratio"}; FXAA ${if (fxaa(ctx)) "on" else "off"}; steady resolution ${if (drsLock(ctx)) "on" else "off"}")
         } catch (t: Throwable) {
             Log.w("GuestHost", "tweaks failed: $t")
         }

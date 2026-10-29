@@ -573,8 +573,8 @@ class MainActivity : Activity() {
     private fun toggleDrs(out: TextView) {
         val on = !Tweaks.drsLock(this)
         Tweaks.setDrsLock(this, on)
-        out.text = if (on) "Lock render size ON: the game's dynamic resolution is kept at its largest step, so the picture stays sharp when you look around. The frame rate can drop in heavy scenes. Applies the next time the game starts. If the picture breaks or goes black, turn it off."
-                   else "Lock render size OFF: the game changes its own resolution. Applies the next time the game starts."
+        out.text = if (on) "Steady resolution ON: the game is made to think the GPU is fast, so its own dynamic resolution stays at the largest step and the picture stays sharp when you look around. The frame rate can drop in heavy scenes. Applies the next time the game starts."
+                   else "Steady resolution OFF: the game changes its own resolution as it likes. Applies the next time the game starts."
     }
 
     private fun chooseCas(out: TextView) {
@@ -671,7 +671,7 @@ class MainActivity : Activity() {
                 btn("FXAA on/off") { toggleFxaa(out) },
                 btn("Stretch to fit on/off") { toggleStretch(out) }))
             addView(row(
-                btn("Lock render size on/off") { toggleDrs(out) }))
+                btn("Steady resolution on/off") { toggleDrs(out) }))
             addView(row(
                 btn("Import Lossless.dll") { importLossless(out) },
                 btn("Check Lossless.dll") { checkLossless(out) }))
