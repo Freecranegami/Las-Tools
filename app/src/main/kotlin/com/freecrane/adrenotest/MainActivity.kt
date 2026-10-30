@@ -580,6 +580,34 @@ class MainActivity : Activity() {
                    else "Frame generation OFF. Applies the next time the game starts."
     }
 
+    private fun chooseLsfg(out: TextView) {
+        val ctx = this
+        val modes = arrayOf("Performance (lighter, faster)", "Quality (heavier, cleaner motion)")
+        val group = android.widget.RadioGroup(this).apply { setPadding(48, 24, 48, 0) }
+        modes.forEachIndexed { i, s -> group.addView(android.widget.RadioButton(ctx).apply { text = s; id = 100 + i }) }
+        group.check(100 + (if (Tweaks.lsfgQuality(this)) 1 else 0))
+        val bar = android.widget.SeekBar(this).apply { max = 20; progress = Tweaks.lsfgFlowSteps(ctx) }
+        val label = TextView(this).apply { setPadding(48, 32, 48, 0) }
+        fun show(p: Int) { label.text = "Flow scale: ${"%.2f".format(java.util.Locale.US, p * 0.05)}  (lower = faster but rougher motion; values below 0.25 run as 0.25)" }
+        show(bar.progress)
+        bar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: android.widget.SeekBar?, p: Int, fromUser: Boolean) { show(p) }
+            override fun onStartTrackingTouch(s: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(s: android.widget.SeekBar?) {}
+        })
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 16, 24, 0); addView(group); addView(label); addView(bar) }
+        AlertDialog.Builder(this)
+            .setTitle("Frame generation settings")
+            .setView(box)
+            .setPositiveButton("Set") { _, _ ->
+                Tweaks.setLsfgQuality(this, group.checkedRadioButtonId == 101)
+                Tweaks.setLsfgFlowSteps(this, bar.progress)
+                out.text = "Frame generation: ${if (Tweaks.lsfgQuality(this)) "quality" else "performance"} mode, flow scale ${"%.2f".format(java.util.Locale.US, bar.progress * 0.05)}. Applies the next time the game starts."
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun toggleDrs(out: TextView) {
         val on = !Tweaks.drsLock(this)
         Tweaks.setDrsLock(this, on)
@@ -686,7 +714,8 @@ class MainActivity : Activity() {
                 btn("Import Lossless.dll") { importLossless(out) },
                 btn("Check Lossless.dll") { checkLossless(out) }))
             addView(row(
-                btn("Frame generation on/off") { toggleLsfg(out) }))
+                btn("Frame generation on/off") { toggleLsfg(out) },
+                btn("Frame gen. quality / flow") { chooseLsfg(out) }))
             addView(row(
                 btn("Probe: system") { runProbe(false, out) },
                 btn("Probe: custom") { runProbe(true, out) }))

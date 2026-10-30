@@ -48,6 +48,12 @@ object Tweaks {
     fun setLsfg(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("lsfg", on).commit() }
 
     // Lock the game's dynamic resolution (its scene size is kept at the largest step). Default off.
+    // Frame generation quality: false = performance (lighter shaders), true = quality. Flow scale in steps of 0.05 (0..20).
+    fun lsfgQuality(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("lsfg_quality", false)
+    fun setLsfgQuality(ctx: Context, q: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("lsfg_quality", q).commit() }
+    fun lsfgFlowSteps(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("lsfg_flow", 10).coerceIn(0, 20)
+    fun setLsfgFlowSteps(ctx: Context, s: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("lsfg_flow", s.coerceIn(0, 20)).commit() }
+
     fun drsLock(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("drs_lock", false)
     fun setDrsLock(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("drs_lock", on).commit() }
 
@@ -81,6 +87,8 @@ object Tweaks {
             if (Lsfg.installed(ctx)) Os.setenv("LAS_LSFG_DLL", Lsfg.dll(ctx).path, true)
             Os.setenv("LAS_LSFG", if (lsfg(ctx) && Lsfg.installed(ctx)) "1" else "0", true)
             Os.setenv("LAS_LSFG_LIB", File(ctx.applicationInfo.nativeLibraryDir, "liblsfgcore.so").path, true)
+            Os.setenv("LAS_LSFG_PERF", if (lsfgQuality(ctx)) "0" else "1", true)
+            Os.setenv("LAS_LSFG_FLOW", "%.2f".format(java.util.Locale.US, lsfgFlowSteps(ctx) * 0.05), true)
             Os.setenv("LAS_DRS", if (drsLock(ctx)) "1" else "0", true)
             Os.setenv("LAS_FXAA", if (fxaa(ctx)) "1" else "0", true)
             val up = upscaler(ctx)
@@ -89,7 +97,7 @@ object Tweaks {
             Os.setenv("LAS_KEEP", if (stretch(ctx)) "0" else "1", true)
             Os.setenv("LAS_RCAS", rcasStops(rcasPercent(ctx)).toString(), true)
             Os.setenv("LAS_CAS", if (c.strength > 0f) c.strength.toString() else "0", true)
-            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; ${if (stretch(ctx)) "stretch to fit" else "keep ratio"}; FXAA ${if (fxaa(ctx)) "on" else "off"}; steady resolution ${if (drsLock(ctx)) "on" else "off"}; frame generation ${if (lsfg(ctx) && Lsfg.installed(ctx)) "on" else "off"}")
+            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; ${if (stretch(ctx)) "stretch to fit" else "keep ratio"}; FXAA ${if (fxaa(ctx)) "on" else "off"}; steady resolution ${if (drsLock(ctx)) "on" else "off"}; frame generation ${if (lsfg(ctx) && Lsfg.installed(ctx)) "on" else "off"} (${if (lsfgQuality(ctx)) "quality" else "performance"}, flow ${"%.2f".format(java.util.Locale.US, lsfgFlowSteps(ctx) * 0.05)})")
         } catch (t: Throwable) {
             Log.w("GuestHost", "tweaks failed: $t")
         }
