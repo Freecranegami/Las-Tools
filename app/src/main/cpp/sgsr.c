@@ -35,7 +35,7 @@ typedef long (*sg_f2)(long, long);
 typedef long (*sg_f4)(long, long, long, long);
 typedef void (*sg_f4v)(long, long, long, long);
 
-#define MAXIMG 8
+#define MAXIMG 16
 #define MAXI (MAXIMG + 1)   /* per-image arrays: one more slot for the generated frame's intermediates */
 #define MAXSC 4
 
