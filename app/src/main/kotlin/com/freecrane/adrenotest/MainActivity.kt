@@ -1008,6 +1008,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try { actionBar?.hide() } catch (t: Throwable) { }
         window.statusBarColor = cBar
         window.navigationBarColor = cBg
 
