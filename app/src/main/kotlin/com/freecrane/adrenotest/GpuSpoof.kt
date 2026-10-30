@@ -50,27 +50,27 @@ object GpuSpoof {
     private const val PREFS = "las"
 
     fun deviceIndex(ctx: Context): Int =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("device_spoof", 1).coerceIn(0, devices.size - 1)
+        Prefs.get(ctx).getInt("device_spoof", 1).coerceIn(0, devices.size - 1)
 
     // sets the phone model and, with it, the matching GPU and CPU
     fun setDevice(ctx: Context, i: Int) {
         val d = devices[i]
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        Prefs.get(ctx).edit()
             .putInt("device_spoof", i).putInt("gpu_spoof", d.gpuIndex).putInt("cpu_spoof", d.cpuIndex).commit()
     }
 
     fun index(ctx: Context): Int =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("gpu_spoof", devices[1].gpuIndex).coerceIn(0, presets.size - 1)
+        Prefs.get(ctx).getInt("gpu_spoof", devices[1].gpuIndex).coerceIn(0, presets.size - 1)
 
     fun set(ctx: Context, i: Int) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("gpu_spoof", i).commit()
+        Prefs.get(ctx).edit().putInt("gpu_spoof", i).commit()
     }
 
     fun cpuIndex(ctx: Context): Int =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("cpu_spoof", devices[1].cpuIndex).coerceIn(0, cpus.size - 1)
+        Prefs.get(ctx).getInt("cpu_spoof", devices[1].cpuIndex).coerceIn(0, cpus.size - 1)
 
     fun setCpu(ctx: Context, i: Int) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("cpu_spoof", i).commit()
+        Prefs.get(ctx).edit().putInt("cpu_spoof", i).commit()
     }
 
     private fun env(k: String, v: String) = Os.setenv(k, v, true)

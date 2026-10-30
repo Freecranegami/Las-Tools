@@ -63,6 +63,8 @@ class MainActivity : Activity() {
     private val pickRequest = 1001
     private val driverRequest = 1002
     private val lsfgRequest = 1003
+    private val iconRequest = 1004
+    private var iconPkg: String? = null
 
     private var surface: Surface? = null
     private lateinit var outView: TextView
@@ -164,6 +166,16 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == iconRequest) {
+            val u = if (resultCode == RESULT_OK) data?.data else null
+            val pkg = iconPkg
+            if (u != null && pkg != null) {
+                val ok = GameMeta.setIconFrom(this, pkg, u)
+                outView.text = if (ok) "Icon changed." else "Couldn't read that picture."
+                refreshPage()
+            }
+            return
+        }
         if (requestCode == lsfgRequest) {
             val u = if (resultCode == RESULT_OK) data?.data else null
             if (u != null) {
@@ -210,6 +222,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 outView.text = msg
                 busy = false
+                refreshPage()
             }
         }.start()
     }
@@ -227,26 +240,6 @@ class MainActivity : Activity() {
     }
 
     // ---------- launching a game ----------
-
-    private fun launchGame() {
-        if (busy) { outView.text = "Busy, wait for the current task to finish"; return }
-        val dirs = File(filesDir, "guests").listFiles { f ->
-            f.isDirectory && File(f, "base.apk").exists()
-        }
-        if (dirs == null || dirs.isEmpty()) {
-            outView.text = "Import a game first."
-            return
-        }
-        val names = dirs.map { it.name }.toTypedArray()
-        if (names.size == 1) {
-            chooseMode(names[0])
-        } else {
-            AlertDialog.Builder(this)
-                .setTitle("Launch which game?")
-                .setItems(names) { _, which -> chooseMode(names[which]) }
-                .show()
-        }
-    }
 
     private fun chooseMode(pkg: String) {
         val dir = File(filesDir, "guests/$pkg")
@@ -283,14 +276,7 @@ class MainActivity : Activity() {
                 startLegacyNative(pkg)
                 return
             }
-            AlertDialog.Builder(this)
-                .setTitle("Launch mode")
-                .setItems(arrayOf(
-                    "1. Run the game's own activity (new)",
-                    "2. Basic native launcher (old)")) { _, which ->
-                    if (which == 0) startReal(pkg, real) else startLegacyNative(pkg)
-                }
-                .show()
+            startReal(pkg, real)
             return
         }
         val modes = arrayOf(
@@ -642,98 +628,468 @@ class MainActivity : Activity() {
     }
 
     // ---------- UI ----------
+    // A home screen with the games, a side menu (three lines, top left) with the settings sections, and a settings page
+    // per game (press and hold a game). Settings changed on a game's page belong to that game only (see Prefs).
 
-    private fun btn(label: String, onClick: () -> Unit): Button =
-        Button(this).apply {
-            text = label
-            isAllCaps = false
-            textSize = 12f
-            setOnClickListener { onClick() }
-        }
+    private val cBg = 0xFF101318.toInt()
+    private val cBar = 0xFF171B22.toInt()
+    private val cCard = 0xFF1C212A.toInt()
+    private val cText = 0xFFEDEFF3.toInt()
+    private val cSub = 0xFF9AA3B2.toInt()
+    private val cAccent = 0xFF5B8DEF.toInt()
 
-    private fun row(vararg buttons: Button): LinearLayout =
-        LinearLayout(this).apply {
+    private lateinit var content: android.widget.FrameLayout
+    private lateinit var titleView: TextView
+    private lateinit var drawerPanel: LinearLayout
+    private lateinit var scrim: android.view.View
+    private lateinit var statusPanel: LinearLayout
+    private var page = "games"          // games | graphics | framegen | device | tools | diag | game:<pkg>
+    private var drawerOpen = false
+    private var pageScroll: ScrollView? = null
+    private val ui = Handler(Looper.getMainLooper())
+    private var watched: android.content.SharedPreferences? = null
+    private val prefListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        ui.removeCallbacks(refreshRunnable); ui.postDelayed(refreshRunnable, 150)
+    }
+    private val refreshRunnable = Runnable { refreshPage() }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun label(text: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
+        this.text = text; textSize = size; setTextColor(color)
+        if (bold) typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+
+    private fun roundBg(color: Int, r: Int = 14) = android.graphics.drawable.GradientDrawable().apply {
+        setColor(color); cornerRadius = dp(r).toFloat()
+    }
+
+    private fun header(b: LinearLayout, text: String) {
+        b.addView(label(text.uppercase(), 12f, cAccent, true).apply { setPadding(dp(4), dp(18), 0, dp(6)); letterSpacing = 0.08f })
+    }
+
+    private fun card(b: LinearLayout, onClick: (() -> Unit)?): LinearLayout {
+        val c = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            for (b in buttons) {
-                addView(b, LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            background = roundBg(cCard)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            if (onClick != null) { isClickable = true; setOnClickListener { onClick() } }
+        }
+        b.addView(c, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
+        return c
+    }
+
+    private fun texts(title: String, sub: String?): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(label(title, 15f, cText))
+        if (!sub.isNullOrEmpty()) addView(label(sub, 12f, cSub).apply { setPadding(0, dp(2), 0, 0) })
+    }
+
+    private fun action(b: LinearLayout, title: String, sub: String?, onClick: () -> Unit) {
+        val c = card(b, onClick)
+        c.addView(texts(title, sub), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        c.addView(label("›", 22f, cSub))
+    }
+
+    private fun toggle(b: LinearLayout, title: String, sub: String?, get: () -> Boolean, flip: () -> Unit) {
+        val c = card(b, null)
+        val sw = android.widget.Switch(this)
+        var guard = false
+        sw.isChecked = get()
+        sw.setOnCheckedChangeListener { _, _ ->
+            if (guard) return@setOnCheckedChangeListener
+            flip()
+            guard = true; sw.isChecked = get(); guard = false
+        }
+        c.setOnClickListener { sw.toggle() }
+        c.isClickable = true
+        c.addView(texts(title, sub), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        c.addView(sw)
+    }
+
+    // ----- settings groups (the same code serves the defaults and a game's own page) -----
+
+    private fun addGraphics(b: LinearLayout) {
+        header(b, "Graphics")
+        val rw = Tweaks.resW(this); val rh = Tweaks.resH(this)
+        action(b, "Resolution", if (rw > 0 && rh > 0) "$rw x $rh" else "Native") { chooseResolution(outView) }
+        action(b, "Upscaler (SGSR / FSR)", Tweaks.upscalers[Tweaks.upscaler(this)].substringBefore(" (")) { chooseUpscaler(outView) }
+        action(b, "RCAS sharpness (FSR 1)", "${Tweaks.rcasPercent(this)} %") { chooseRcas(outView) }
+        action(b, "CAS sharpening", Tweaks.casLevels[Tweaks.casIndex(this)].label) { chooseCas(outView) }
+        toggle(b, "FXAA", "Smooths jagged edges", { Tweaks.fxaa(this) }) { toggleFxaa(outView) }
+        toggle(b, "Stretch to fit", "Off keeps the picture's ratio with black bars", { Tweaks.stretch(this) }) { toggleStretch(outView) }
+        toggle(b, "Steady resolution", "Stops the game's dynamic resolution from dropping", { Tweaks.drsLock(this) }) { toggleDrs(outView) }
+    }
+
+    private fun addFrameGen(b: LinearLayout, withDll: Boolean) {
+        header(b, "Frame generation")
+        toggle(b, "Frame generation (2x)", if (Lsfg.installed(this)) "Makes an in-between frame for every game frame" else "Import Lossless.dll first",
+            { Tweaks.lsfg(this) }) { toggleLsfg(outView) }
+        action(b, "Quality and flow scale",
+            "${if (Tweaks.lsfgQuality(this)) "Quality" else "Performance"}, flow ${"%.2f".format(java.util.Locale.US, Tweaks.lsfgFlowSteps(this) * 0.05)}") { chooseLsfg(outView) }
+        if (withDll) {
+            action(b, "Import Lossless.dll", if (Lsfg.installed(this)) "Imported" else "Not imported") { importLossless(outView) }
+            action(b, "Check Lossless.dll", "Tests that the shaders can be used on this phone") { checkLossless(outView) }
+        }
+    }
+
+    private fun addDevice(b: LinearLayout) {
+        header(b, "Device")
+        action(b, "GPU spoof", GpuSpoof.presets[GpuSpoof.index(this)].label) { chooseGpu(outView) }
+        action(b, "CPU spoof", GpuSpoof.cpus[GpuSpoof.cpuIndex(this)].label) { chooseCpu(outView) }
+        action(b, "Device spoof", GpuSpoof.devices[GpuSpoof.deviceIndex(this)].label) { chooseDevice(outView) }
+        val drv = try { Drivers.list(this).firstOrNull { it.id == Drivers.selectedId(this) }?.label } catch (t: Throwable) { null }
+        action(b, "Vulkan driver", drv ?: "Bundled") { chooseDriver(outView) }
+        toggle(b, "Focus guard", "Keeps the game running when the notification shade opens", { FocusGuard.enabled(this) }) { toggleFocusGuard(outView) }
+        toggle(b, "Light mode", "No diagnostics, best performance", { Tweaks.light(this) }) { toggleLight(outView) }
+    }
+
+    // ----- pages -----
+
+    private fun gamesPage(box: LinearLayout) {
+        val games = GameMeta.games(this)
+        val wDp = resources.displayMetrics.widthPixels / resources.displayMetrics.density
+        val cols = maxOf(2, (wDp / 120f).toInt())
+        val grid = android.widget.GridLayout(this).apply { columnCount = cols }
+        fun lp() = android.widget.GridLayout.LayoutParams(
+            android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED),
+            android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)).apply {
+            width = 0; setMargins(dp(6), dp(6), dp(6), dp(10)); setGravity(android.view.Gravity.FILL_HORIZONTAL)
+        }
+        for (pkg in games) {
+            val tile = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = android.view.Gravity.CENTER_HORIZONTAL; isClickable = true }
+            val img = android.widget.ImageView(this).apply {
+                setImageBitmap(GameMeta.icon(this@MainActivity, pkg))
+                scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                outlineProvider = object : android.view.ViewOutlineProvider() {
+                    override fun getOutline(v: android.view.View, o: android.graphics.Outline) { o.setRoundRect(0, 0, v.width, v.height, dp(20).toFloat()) }
+                }
+                clipToOutline = true
             }
+            tile.addView(img, LinearLayout.LayoutParams(dp(84), dp(84)))
+            tile.addView(label(GameMeta.name(this, pkg), 13f, cText).apply {
+                gravity = android.view.Gravity.CENTER; maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, dp(6), 0, 0)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            tile.setOnClickListener { playGame(pkg) }
+            tile.setOnLongClickListener {
+                try { tile.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS) } catch (t: Throwable) { }
+                showPage("game:$pkg"); true
+            }
+            grid.addView(tile, lp())
         }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        val out = TextView(this).apply {
-            textSize = 13f
-            setTextIsSelectable(true)
+        val add = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = android.view.Gravity.CENTER_HORIZONTAL; isClickable = true }
+        add.addView(label("+", 34f, cSub).apply { gravity = android.view.Gravity.CENTER; background = roundBg(cCard, 20) }, LinearLayout.LayoutParams(dp(84), dp(84)))
+        add.addView(label("Add game", 13f, cSub).apply { gravity = android.view.Gravity.CENTER; setPadding(0, dp(6), 0, 0) })
+        add.setOnClickListener { pickApk() }
+        grid.addView(add, lp())
+        if (games.isEmpty()) {
+            box.addView(label("No games yet. Tap + to import one (its APK files and OBB).", 14f, cSub).apply { setPadding(dp(4), dp(8), dp(4), dp(8)) })
+        } else {
+            box.addView(label("Tap a game to play. Press and hold for its settings.", 12f, cSub).apply { setPadding(dp(4), 0, dp(4), dp(8)) })
         }
-        outView = out
+        box.addView(grid, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
 
+    private fun gameSettingsPage(box: LinearLayout, pkg: String) {
+        val head = card(box, null)
+        head.addView(android.widget.ImageView(this).apply {
+            setImageBitmap(GameMeta.icon(this@MainActivity, pkg))
+            outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(v: android.view.View, o: android.graphics.Outline) { o.setRoundRect(0, 0, v.width, v.height, dp(14).toFloat()) }
+            }
+            clipToOutline = true
+        }, LinearLayout.LayoutParams(dp(56), dp(56)).apply { rightMargin = dp(14) })
+        head.addView(texts(GameMeta.name(this, pkg), pkg), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val play = Button(this).apply { text = "Play"; isAllCaps = false; setOnClickListener { playGame(pkg) } }
+        head.addView(play)
+
+        header(box, "Game")
+        action(box, "Name", GameMeta.name(this, pkg)) { renameGame(pkg) }
+        action(box, "Icon", if (GameMeta.hasCustomIcon(this, pkg)) "Custom picture" else "The game's own") { chooseIcon(pkg) }
+        action(box, "Add shortcut to the home screen", "Starts this game directly") { pinShortcut(pkg) }
+        action(box, "Play with the old basic launcher", "Only if the normal start doesn't work") { startLegacyNative(pkg) }
+        header(box, "This game's settings")
+        box.addView(label("Changes here affect only this game. Anything you never change here follows the defaults from the menu.", 12f, cSub).apply { setPadding(dp(4), 0, dp(4), dp(8)) })
+        addGraphics(box)
+        addFrameGen(box, false)
+        addDevice(box)
+        action(box, "Reset this game's settings", "Go back to the defaults") {
+            AlertDialog.Builder(this).setTitle("Reset settings?").setMessage("${GameMeta.name(this, pkg)} will follow the default settings again.")
+                .setPositiveButton("Reset") { _, _ ->
+                    Prefs.gameOnly(this, pkg).edit().clear().commit()
+                    outView.text = "Settings reset. Applies the next time the game starts."
+                    refreshPage()
+                }.setNegativeButton("Cancel", null).show()
+        }
+    }
+
+    private fun toolsPage(box: LinearLayout) {
+        header(box, "Games")
+        action(box, "Import game", "APK files and OBB") { pickApk() }
+        action(box, "Imported list", "What was imported and how it was read") { showImported(outView) }
+        action(box, "File manager", "Browse the game's files") { startActivity(Intent(this, FileManagerActivity::class.java)) }
+        header(box, "Logs")
+        action(box, "Guest log", "Copies the game's log: send this when something is wrong") { GuestLog.copy(this, outView) }
+        action(box, "Show log", "The last lines of the phone's log, here") { showLog() }
+        action(box, "Copy log", "The last 700 lines to the clipboard") { copyLog() }
+    }
+
+    private fun diagPage(box: LinearLayout) {
+        header(box, "Tests")
+        action(box, "Probe: system driver", null) { runProbe(false, outView) }
+        action(box, "Probe: custom driver", null) { runProbe(true, outView) }
+        action(box, "Render: system driver", null) { runRender(false, outView) }
+        action(box, "Render: custom driver", null) { runRender(true, outView) }
+        action(box, "Linked: system driver", null) { linkedTest(false, outView) }
+        action(box, "Linked: custom driver", null) { linkedTest(true, outView) }
+        action(box, "Linked: shim", null) { linkedShim(outView) }
         val sv = SurfaceView(this)
         sv.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(h: SurfaceHolder) { surface = h.surface }
             override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {}
             override fun surfaceDestroyed(h: SurfaceHolder) { surface = null }
         })
+        box.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(180)))
+    }
 
-        val scroller = ScrollView(this).apply { addView(out) }
+    private fun pageTitle(p: String): String = when {
+        p == "games" -> "Las Tools"
+        p == "graphics" -> "Graphics (defaults)"
+        p == "framegen" -> "Frame generation (defaults)"
+        p == "device" -> "Device (defaults)"
+        p == "tools" -> "Tools"
+        p == "diag" -> "Diagnostics"
+        p.startsWith("game:") -> GameMeta.name(this, p.removePrefix("game:")) + " settings"
+        else -> "Las Tools"
+    }
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(16, 32, 16, 16)
-            addView(row(
-                btn("Import game") { pickApk() },
-                btn("Imported list") { showImported(out) },
-                btn("Launch game") { launchGame() }))
-            addView(row(
-                btn("Show log") { showLog() },
-                btn("Copy log") { copyLog() },
-                btn("Guest log") { GuestLog.copy(this@MainActivity, out) }))
-            addView(row(
-                btn("GPU spoof") { chooseGpu(out) },
-                btn("CPU spoof") { chooseCpu(out) },
-                btn("Device spoof") { chooseDevice(out) }))
-            addView(row(
-                btn("File manager") { startActivity(Intent(this@MainActivity, FileManagerActivity::class.java)) }))
-            addView(row(
-                btn("Drivers") { chooseDriver(out) },
-                btn("Focus guard on/off") { toggleFocusGuard(out) }))
-            addView(row(
-                btn("Light mode on/off") { toggleLight(out) },
-                btn("CAS sharpening") { chooseCas(out) },
-                btn("Resolution") { chooseResolution(out) }))
-            addView(row(
-                btn("Upscaler (SGSR / FSR)") { chooseUpscaler(out) },
-                btn("RCAS sharpness") { chooseRcas(out) }))
-            addView(row(
-                btn("FXAA on/off") { toggleFxaa(out) },
-                btn("Stretch to fit on/off") { toggleStretch(out) }))
-            addView(row(
-                btn("Steady resolution on/off") { toggleDrs(out) }))
-            addView(row(
-                btn("Import Lossless.dll") { importLossless(out) },
-                btn("Check Lossless.dll") { checkLossless(out) }))
-            addView(row(
-                btn("Frame generation on/off") { toggleLsfg(out) },
-                btn("Frame gen. quality / flow") { chooseLsfg(out) }))
-            addView(row(
-                btn("Probe: system") { runProbe(false, out) },
-                btn("Probe: custom") { runProbe(true, out) }))
-            addView(row(
-                btn("Render: system") { runRender(false, out) },
-                btn("Render: custom") { runRender(true, out) }))
-            addView(row(
-                btn("Linked: system") { linkedTest(false, out) },
-                btn("Linked: custom") { linkedTest(true, out) },
-                btn("Linked: shim") { linkedShim(out) }))
-            addView(scroller, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 2f))
-            addView(sv, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+    private fun showPage(p: String) {
+        page = p
+        setScope(if (p.startsWith("game:")) p.removePrefix("game:") else null)
+        closeDrawer()
+        pageScroll = null
+        buildPage()
+    }
+
+    private fun refreshPage() {
+        val y = pageScroll?.scrollY ?: 0
+        buildPage()
+        pageScroll?.post { pageScroll?.scrollTo(0, y) }
+    }
+
+    private fun buildPage() {
+        titleView.text = pageTitle(page)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(10), dp(14), dp(24)) }
+        when {
+            page == "games" -> gamesPage(box)
+            page == "graphics" -> addGraphics(box)
+            page == "framegen" -> addFrameGen(box, true)
+            page == "device" -> addDevice(box)
+            page == "tools" -> toolsPage(box)
+            page == "diag" -> diagPage(box)
+            page.startsWith("game:") -> gameSettingsPage(box, page.removePrefix("game:"))
+        }
+        val sc = ScrollView(this).apply { addView(box); isFillViewport = false }
+        pageScroll = sc
+        content.removeAllViews()
+        content.addView(sc, android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        if (page == "games") loadGameMeta()
+    }
+
+    // Settings are read and written through Prefs; while a game's page is open its package is the scope.
+    private fun setScope(pkg: String?) {
+        Prefs.scope = pkg
+        try { watched?.unregisterOnSharedPreferenceChangeListener(prefListener) } catch (t: Throwable) { }
+        watched = Prefs.get(this)
+        watched?.registerOnSharedPreferenceChangeListener(prefListener)
+    }
+
+    private var metaLoading = false
+    private fun loadGameMeta() {
+        if (metaLoading) return
+        val todo = GameMeta.games(this).filter { !File(filesDir, "guests/$it/meta_tried").exists() }
+        if (todo.isEmpty()) return
+        metaLoading = true
+        Thread {
+            for (p in todo) GameMeta.ensureDefaults(this, p)
+            runOnUiThread { metaLoading = false; if (page == "games") refreshPage() }
+        }.start()
+    }
+
+    // ----- game actions -----
+
+    private fun playGame(pkg: String) {
+        if (busy) { outView.text = "Busy, wait for the current task to finish"; return }
+        chooseMode(pkg)
+    }
+
+    private fun renameGame(pkg: String) {
+        val box = android.widget.EditText(this).apply { setText(GameMeta.name(this@MainActivity, pkg)); setSelectAllOnFocus(true); setSingleLine() }
+        val wrap = LinearLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(box, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)) }
+        AlertDialog.Builder(this).setTitle("Game name").setView(wrap)
+            .setPositiveButton("Save") { _, _ -> GameMeta.setName(this, pkg, box.text.toString()); refreshPage() }
+            .setNeutralButton("Original name") { _, _ -> GameMeta.setName(this, pkg, ""); refreshPage() }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun chooseIcon(pkg: String) {
+        val items = if (GameMeta.hasCustomIcon(this, pkg)) arrayOf("Pick a picture...", "Use the game's own icon") else arrayOf("Pick a picture...")
+        AlertDialog.Builder(this).setTitle("Icon").setItems(items) { _, which ->
+            if (which == 0) {
+                iconPkg = pkg
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "image/*" }, iconRequest)
+            } else { GameMeta.clearIcon(this, pkg); refreshPage() }
+        }.show()
+    }
+
+    private fun pinShortcut(pkg: String) {
+        try {
+            val sm = getSystemService(android.content.pm.ShortcutManager::class.java)
+            if (sm == null || !sm.isRequestPinShortcutSupported) {
+                outView.text = "This launcher can't add shortcuts from an app. Try a different home screen app, or add the shortcut from the launcher's own menu."
+                return
+            }
+            val i = Intent(this, MainActivity::class.java).setAction(Intent.ACTION_VIEW).putExtra("play", pkg)
+            val name = GameMeta.name(this, pkg)
+            val info = android.content.pm.ShortcutInfo.Builder(this, "game_$pkg")
+                .setShortLabel(name).setLongLabel(name)
+                .setIcon(android.graphics.drawable.Icon.createWithBitmap(GameMeta.icon(this, pkg)))
+                .setIntent(i).build()
+            sm.requestPinShortcut(info, null)
+            outView.text = "Asked the launcher to add a shortcut for $name. Confirm it on the prompt that appears."
+        } catch (t: Throwable) {
+            outView.text = "Couldn't add the shortcut: $t"
+        }
+    }
+
+    // ----- side menu -----
+
+    private fun openDrawer() {
+        drawerOpen = true
+        scrim.visibility = android.view.View.VISIBLE
+        scrim.animate().alpha(1f).setDuration(160).start()
+        (drawerSlide ?: drawerPanel).animate().translationX(0f).setDuration(200).start()
+    }
+
+    private fun closeDrawer() {
+        if (!drawerOpen) return
+        drawerOpen = false
+        scrim.animate().alpha(0f).setDuration(160).withEndAction { if (!drawerOpen) scrim.visibility = android.view.View.GONE }.start()
+        (drawerSlide ?: drawerPanel).animate().translationX(-dp(290).toFloat()).setDuration(200).start()
+    }
+
+    private fun drawerItem(text: String, p: String): TextView = label(text, 16f, cText).apply {
+        setPadding(dp(24), dp(14), dp(16), dp(14)); isClickable = true
+        setOnClickListener { showPage(p) }
+    }
+
+    private fun drawerHeader(text: String): TextView = label(text.uppercase(), 11f, cSub, true).apply {
+        setPadding(dp(24), dp(18), dp(16), dp(4)); letterSpacing = 0.08f
+    }
+
+    override fun onBackPressed() {
+        if (drawerOpen) { closeDrawer(); return }
+        if (page != "games") { showPage("games"); return }
+        super.onBackPressed()
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val play = intent?.getStringExtra("play")
+        if (play != null) { showPage("games"); playGame(play) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::content.isInitialized) refreshPage()
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.statusBarColor = cBar
+        window.navigationBarColor = cBg
+
+        val out = TextView(this).apply { textSize = 12f; setTextColor(cText); setTextIsSelectable(true) }
+        outView = out
+
+        // top bar
+        titleView = label("Las Tools", 18f, cText, true)
+        val burger = label("☰", 26f, cText).apply { setPadding(dp(18), 0, dp(18), 0); gravity = android.view.Gravity.CENTER; isClickable = true; setOnClickListener { openDrawer() } }
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL; setBackgroundColor(cBar)
+            addView(burger, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(56)))
+            addView(titleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+
+        content = android.widget.FrameLayout(this)
+
+        // output panel (shown when there is something to say)
+        val clear = label("✕", 16f, cSub).apply { setPadding(dp(14), dp(6), dp(14), dp(6)); isClickable = true; setOnClickListener { out.text = "" } }
+        val statusHead = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(label("Message", 12f, cSub, true).apply { setPadding(dp(14), 0, 0, 0) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(clear)
+        }
+        val outScroll = ScrollView(this).apply { addView(out); setPadding(dp(14), 0, dp(14), dp(10)) }
+        statusPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(cBar); visibility = android.view.View.GONE
+            addView(statusHead)
+            addView(outScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(200)))
+        }
+        out.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                statusPanel.visibility = if (s.isNullOrEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+            }
+        })
+
+        val main = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(cBg)
+            addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(statusPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+
+        // side menu
+        scrim = android.view.View(this).apply { setBackgroundColor(0x99000000.toInt()); alpha = 0f; visibility = android.view.View.GONE; setOnClickListener { closeDrawer() } }
+        drawerPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(cBar)
+            isClickable = true
+            addView(label("Las Tools", 22f, cText, true).apply { setPadding(dp(24), dp(28), dp(16), dp(4)) })
+            addView(label("Defaults below apply to every game unless you change them in the game's own settings (press and hold a game).", 12f, cSub).apply { setPadding(dp(24), 0, dp(20), dp(8)) })
+            addView(drawerItem("Games", "games"))
+            addView(drawerHeader("Default settings"))
+            addView(drawerItem("Graphics", "graphics"))
+            addView(drawerItem("Frame generation", "framegen"))
+            addView(drawerItem("Device", "device"))
+            addView(drawerHeader("More"))
+            addView(drawerItem("Tools and logs", "tools"))
+            addView(drawerItem("Diagnostics", "diag"))
+        }
+        val drawerScroll = ScrollView(this).apply { addView(drawerPanel); setBackgroundColor(cBar) }
+
+        val root = android.widget.FrameLayout(this).apply {
+            setBackgroundColor(cBg)
+            addView(main, android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(scrim, android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(drawerScroll, android.widget.FrameLayout.LayoutParams(dp(290), ViewGroup.LayoutParams.MATCH_PARENT))
         }
         setContentView(root)
+        drawerScroll.translationX = -dp(290).toFloat()
+        drawerPanel.translationX = 0f
+        drawerSlide = drawerScroll
+
+        setScope(null)
+        buildPage()
 
         val auto = intent?.getStringExtra("launch")
         if (auto != null) autoLaunch(auto, intent?.getStringExtra("mode"))
+        val play = intent?.getStringExtra("play")
+        if (play != null) playGame(play)
     }
+
+    private var drawerSlide: android.view.View? = null
 }

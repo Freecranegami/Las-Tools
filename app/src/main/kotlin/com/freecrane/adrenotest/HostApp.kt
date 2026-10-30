@@ -154,10 +154,10 @@ object FocusGuard {
     private const val KEY = "ignore_focus_loss"
 
     fun enabled(ctx: android.content.Context): Boolean =
-        ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).getBoolean(KEY, true)
+        Prefs.get(ctx).getBoolean(KEY, true)
 
     fun set(ctx: android.content.Context, on: Boolean) {
-        ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit().putBoolean(KEY, on).commit()
+        Prefs.get(ctx).edit().putBoolean(KEY, on).commit()
     }
 
     fun install(a: Activity) {

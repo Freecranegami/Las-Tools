@@ -52,6 +52,7 @@ class GuestNativeActivity : NativeActivity() {
     private fun prepare() {
         val app = applicationContext
         val pkg = intent.getStringExtra("pkg") ?: throw IllegalStateException("no game chosen")
+        Prefs.scope = pkg
         val root = File(filesDir, "guests/$pkg")
         val apk = File(root, "base.apk")
         val libDir = File(root, "lib")

@@ -53,8 +53,8 @@ object Drivers {
         return out
     }
 
-    fun selectedId(ctx: Context): String = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, "") ?: ""
-    fun select(ctx: Context, id: String) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, id).commit() }
+    fun selectedId(ctx: Context): String = Prefs.get(ctx).getString(KEY, "") ?: ""
+    fun select(ctx: Context, id: String) { Prefs.get(ctx).edit().putString(KEY, id).commit() }
 
     // The driver the game uses: the chosen one, or the bundled Turnip when none is chosen or the files are gone.
     fun active(ctx: Context): Info {

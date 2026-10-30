@@ -18,55 +18,55 @@ object Tweaks {
         Cas("Strong (0.8)", 0.8f),
     )
 
-    fun light(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("light_mode", false)
-    fun setLight(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("light_mode", on).commit() }
+    fun light(ctx: Context): Boolean = Prefs.get(ctx).getBoolean("light_mode", false)
+    fun setLight(ctx: Context, on: Boolean) { Prefs.get(ctx).edit().putBoolean("light_mode", on).commit() }
 
-    fun casIndex(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("cas_level", 0).coerceIn(0, casLevels.size - 1)
-    fun setCas(ctx: Context, i: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("cas_level", i).commit() }
+    fun casIndex(ctx: Context): Int = Prefs.get(ctx).getInt("cas_level", 0).coerceIn(0, casLevels.size - 1)
+    fun setCas(ctx: Context, i: Int) { Prefs.get(ctx).edit().putInt("cas_level", i).commit() }
 
     // FXAA: anti-aliasing of the picture the game presents (before the upscale when SGSR is used).
-    fun fxaa(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("fxaa", false)
-    fun setFxaa(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("fxaa", on).commit() }
+    fun fxaa(ctx: Context): Boolean = Prefs.get(ctx).getBoolean("fxaa", false)
+    fun setFxaa(ctx: Context, on: Boolean) { Prefs.get(ctx).edit().putBoolean("fxaa", on).commit() }
 
     // Upscaler: the game renders smaller than the screen (the Resolution set here, or the game's own resolution option)
     // and the picture is upscaled to the screen: 0 = off, 1 = Snapdragon Game Super Resolution 1, 2 = AMD FSR 1 (EASU + RCAS).
     val upscalers = listOf("Off", "SGSR 1 (Snapdragon Game Super Resolution)", "FSR 1 (AMD FidelityFX, EASU + RCAS)")
     fun upscaler(ctx: Context): Int {
-        val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val p = Prefs.get(ctx)
         return p.getInt("upscaler", if (p.getBoolean("sgsr", false)) 1 else 0).coerceIn(0, 2)
     }
-    fun setUpscaler(ctx: Context, i: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("upscaler", i).commit() }
+    fun setUpscaler(ctx: Context, i: Int) { Prefs.get(ctx).edit().putInt("upscaler", i).commit() }
 
     // FSR 1's RCAS sharpening, shown as 0..100 % (100 % = sharpest). The filter itself takes "stops" of reduction: 0 stops is
     // the sharpest, 2 stops is very soft; AMD suggests about 0.2 as a default.
-    fun rcasPercent(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("rcas_pct", 90).coerceIn(0, 100)
-    fun setRcasPercent(ctx: Context, v: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("rcas_pct", v.coerceIn(0, 100)).commit() }
+    fun rcasPercent(ctx: Context): Int = Prefs.get(ctx).getInt("rcas_pct", 90).coerceIn(0, 100)
+    fun setRcasPercent(ctx: Context, v: Int) { Prefs.get(ctx).edit().putInt("rcas_pct", v.coerceIn(0, 100)).commit() }
     fun rcasStops(pct: Int): Float = (100 - pct.coerceIn(0, 100)) / 100f * 2f
 
     // Frame generation (Lossless Scaling's algorithm, needs the user's Lossless.dll). Default off.
-    fun lsfg(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("lsfg", false)
-    fun setLsfg(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("lsfg", on).commit() }
+    fun lsfg(ctx: Context): Boolean = Prefs.get(ctx).getBoolean("lsfg", false)
+    fun setLsfg(ctx: Context, on: Boolean) { Prefs.get(ctx).edit().putBoolean("lsfg", on).commit() }
 
     // Lock the game's dynamic resolution (its scene size is kept at the largest step). Default off.
     // Frame generation quality: false = performance (lighter shaders), true = quality. Flow scale in steps of 0.05 (0..20).
-    fun lsfgQuality(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("lsfg_quality", false)
-    fun setLsfgQuality(ctx: Context, q: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("lsfg_quality", q).commit() }
-    fun lsfgFlowSteps(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("lsfg_flow", 10).coerceIn(0, 20)
-    fun setLsfgFlowSteps(ctx: Context, s: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("lsfg_flow", s.coerceIn(0, 20)).commit() }
+    fun lsfgQuality(ctx: Context): Boolean = Prefs.get(ctx).getBoolean("lsfg_quality", false)
+    fun setLsfgQuality(ctx: Context, q: Boolean) { Prefs.get(ctx).edit().putBoolean("lsfg_quality", q).commit() }
+    fun lsfgFlowSteps(ctx: Context): Int = Prefs.get(ctx).getInt("lsfg_flow", 10).coerceIn(0, 20)
+    fun setLsfgFlowSteps(ctx: Context, s: Int) { Prefs.get(ctx).edit().putInt("lsfg_flow", s.coerceIn(0, 20)).commit() }
 
-    fun drsLock(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("drs_lock", false)
-    fun setDrsLock(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("drs_lock", on).commit() }
+    fun drsLock(ctx: Context): Boolean = Prefs.get(ctx).getBoolean("drs_lock", false)
+    fun setDrsLock(ctx: Context, on: Boolean) { Prefs.get(ctx).edit().putBoolean("drs_lock", on).commit() }
 
     // Stretch to fit (default on): a game picture whose ratio differs from the screen's is stretched over the whole screen.
     // Off: the ratio is kept and black bars fill the rest (the picture then goes through the shim's own full-size swapchain).
-    fun stretch(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("stretch", true)
-    fun setStretch(ctx: Context, on: Boolean) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("stretch", on).commit() }
+    fun stretch(ctx: Context): Boolean = Prefs.get(ctx).getBoolean("stretch", true)
+    fun setStretch(ctx: Context, on: Boolean) { Prefs.get(ctx).edit().putBoolean("stretch", on).commit() }
 
     // Custom resolution: the game is told the screen is this size (window size queries, Vulkan surface size, touch
     // positions) so it renders smaller and the system scales the picture up. 0x0 = the screen's own size.
-    fun resW(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("res_w", 0)
-    fun resH(ctx: Context): Int = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("res_h", 0)
-    fun setRes(ctx: Context, w: Int, h: Int) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("res_w", w).putInt("res_h", h).commit() }
+    fun resW(ctx: Context): Int = Prefs.get(ctx).getInt("res_w", 0)
+    fun resH(ctx: Context): Int = Prefs.get(ctx).getInt("res_h", 0)
+    fun setRes(ctx: Context, w: Int, h: Int) { Prefs.get(ctx).edit().putInt("res_w", w).putInt("res_h", h).commit() }
 
     // The screen size in landscape order (the game runs in landscape).
     fun screenSize(ctx: Context): Pair<Int, Int> {

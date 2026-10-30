@@ -65,6 +65,7 @@ class GuestActivity : Activity() {
     private fun launchGuest() {
         val app = applicationContext      // always the host app, never overridden
         val pkg = intent.getStringExtra("pkg") ?: throw IllegalStateException("no game chosen")
+        Prefs.scope = pkg
         val root = File(filesDir, "guests/$pkg")
         val apk = File(root, "base.apk")
         val libDir = File(root, "lib")
