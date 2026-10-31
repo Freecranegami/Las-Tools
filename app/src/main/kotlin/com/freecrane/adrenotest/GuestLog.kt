@@ -37,7 +37,7 @@ object GuestLog {
     private val important = listOf(
         " E ", " F ", "GuestHost", "GuestGame", "Unity", "JNI", "Abort", "signal", "vkshim",
         "CANNOT", "dlopen", "linker", "libvulkan", "libvkshim", "Vulkan", "vulkan",
-        "clns", "native-fail", "native-open", "crash-info", "crash-regs", "crash-code", "read-fix", "crash-mem", "crash-match", "crash-recent", "native-asset", "native-hw", "native-prop", "native-gl", "lifecycle", "native-stderr", "native-ioctl", "vkshim: kgsl", "vkshim: mem", "file hooks", "snap[", "native thread", "asset packs", "split names", "asset", "splits on disk", "FindClass", "pm ", "play probe", "ctx probe", "Fatal", "FATAL", "Exception"
+        "clns", "native-fail", "native-open", "crash-info", "crash-regs", "crash-code", "read-fix", "crash-mem", "crash-match", "crash-recent", "native-asset", "native-hw", "native-prop", "native-gl", "lifecycle", "native-stderr", "native-ioctl", "vkshim: kgsl", "vkshim: mem", "file hooks", "snap[", "native thread", "asset packs", "split names", "asset", "splits on disk", "FindClass", "pm ", "play probe", "ctx probe", "Fatal", "FATAL", "Exception", "Abort message", "JNI DETECTED", "pending exception"
     )
 
     // "diag: image WxH": only the ones that could be a render target (at least 600 wide)

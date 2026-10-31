@@ -20,7 +20,8 @@ import java.util.WeakHashMap
 
 // A made-up Xbox 360 controller that the game sees as plugged in. The data comes from the on-screen controller.
 object PadDevice {
-    const val ID = 9990
+    // A small number like a real device's: some games keep a short table of devices and stop on an id outside it.
+    @Volatile var ID = 20
     private const val TAG = "GuestHost"
     private var dev: InputDevice? = null
     private var mgr: Any? = null
@@ -38,6 +39,9 @@ object PadDevice {
 
     private fun build(): InputDevice? {
         val ids = InputDevice.getDeviceIds()
+        var pick = 20
+        while (ids.contains(pick)) pick++
+        ID = pick
         var real: InputDevice? = null
         for (id in ids) { real = InputDevice.getDevice(id); if (real != null) break }
         if (real == null) return null
