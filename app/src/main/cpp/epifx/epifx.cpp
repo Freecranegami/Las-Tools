@@ -213,7 +213,7 @@ std::string describe(const std::string &root, const std::string &file) {
     X(DestroyPipeline) X(CmdBeginRenderPass) X(CmdEndRenderPass) X(CmdBindPipeline) X(CmdBindDescriptorSets) X(CmdDraw) \
     X(CmdPipelineBarrier) X(CmdBlitImage) X(CmdCopyBufferToImage) X(CreateCommandPool) X(DestroyCommandPool) \
     X(AllocateCommandBuffers) X(BeginCommandBuffer) X(EndCommandBuffer) X(QueueSubmit) X(CreateFence) X(DestroyFence) \
-    X(WaitForFences)
+    X(WaitForFences) X(CreateQueryPool) X(DestroyQueryPool) X(CmdResetQueryPool) X(CmdWriteTimestamp) X(GetQueryPoolResults)
 
 struct Fn {
 #define X(n) PFN_vk##n n = nullptr;
@@ -221,6 +221,7 @@ struct Fn {
 #undef X
     PFN_vkGetPhysicalDeviceMemoryProperties GetMemProps = nullptr;
     PFN_vkGetPhysicalDeviceFormatProperties GetFormatProps = nullptr;
+    PFN_vkGetPhysicalDeviceProperties GetProps = nullptr;
 };
 
 VkFormat texFormat(reshadefx::texture_format f) {
@@ -323,6 +324,8 @@ struct Pass {
     VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     bool clear = false;
     std::vector<int> mipTargets;
+    std::vector<VkDescriptorSet> dsv;       // direct mode: one set per source image, for passes that read the game's picture
+    bool usesBack = false;
     std::string name;
 };
 
@@ -370,7 +373,11 @@ struct Fx {
     VkDevice dev = VK_NULL_HANDLE; VkPhysicalDevice phys = VK_NULL_HANDLE;
     VkPhysicalDeviceMemoryProperties mp;
     uint32_t w = 0, h = 0; VkFormat fmt = VK_FORMAT_UNDEFINED;
-    VkImage imgA = VK_NULL_HANDLE; Img A, B, dummyDepth;
+    Img A, B, C, dummyDepth;                              // A: the upscaler's picture (made here, written by the shim), B / C: ping-pong
+    bool direct = false;                                  // no upscaler pass: the effects read the game's own images (srcs)
+    std::vector<Img> srcs;
+    VkQueryPool qp = VK_NULL_HANDLE; uint32_t nq = 0; double period = 1.0;
+    std::vector<double> accMs; std::vector<uint32_t> accN; std::vector<std::string> names;
     VkRenderPass finalRp = VK_NULL_HANDLE;
     VkRenderPass rpBack = VK_NULL_HANDLE;                 // render pass used for pipelines of passes that render into the picture
     std::vector<std::unique_ptr<Effect>> fx;
@@ -578,8 +585,9 @@ bool buildEffect(Fx &x, const std::string &root, const std::string &file, const 
         VkDescriptorSetLayoutBinding b0 = { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
         VkDescriptorSetLayoutCreateInfo li = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO }; li.bindingCount = 1; li.pBindings = &b0;
         if (x.f.CreateDescriptorSetLayout(x.dev, &li, nullptr, &e.dsl0) != VK_SUCCESS) { why = "dsl0"; return false; }
-        VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }, { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (uint32_t)std::max<size_t>(1, nsamp) } };
-        VkDescriptorPoolCreateInfo pi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO }; pi.maxSets = (uint32_t)(npass + 1); pi.poolSizeCount = 2; pi.pPoolSizes = ps;
+        uint32_t mult = 1 + (uint32_t)x.srcs.size();
+        VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }, { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (uint32_t)std::max<size_t>(1, nsamp) * mult } };
+        VkDescriptorPoolCreateInfo pi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO }; pi.maxSets = (uint32_t)(npass * mult + 1); pi.poolSizeCount = 2; pi.pPoolSizes = ps;
         if (x.f.CreateDescriptorPool(x.dev, &pi, nullptr, &e.pool) != VK_SUCCESS) { why = "pool"; return false; }
         VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO }; ai.descriptorPool = e.pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &e.dsl0;
         if (x.f.AllocateDescriptorSets(x.dev, &ai, &e.ds0) != VK_SUCCESS) { why = "ds0"; return false; }
@@ -727,10 +735,11 @@ bool buildEffect(Fx &x, const std::string &root, const std::string &file, const 
     return true;
 }
 
-// Decides, pass by pass, which of the two picture images (A: from the upscaler, B: ours) each pass reads and writes, and writes the
-// descriptors. The last pass that writes the picture renders straight into the swapchain image.
+// Decides, pass by pass, which picture image each pass reads and writes, and writes the descriptors. Images: 0 = the picture as it
+// came in (A from the upscaler, or in direct mode the game's own image), 1 = B, 2 = C (direct mode only). The last pass that writes
+// the picture renders straight into the swapchain image.
 bool wire(Fx &x, std::vector<Effect *> &list, std::string &why) {
-    int cur = 0;                                // 0 = A holds the picture, 1 = B
+    int cur = 0;
     Pass *lastBack = nullptr;
     for (auto *e : list) for (auto &p : e->passes) if (p.toBack) lastBack = &p;
     for (auto *e : list) {
@@ -738,48 +747,70 @@ bool wire(Fx &x, std::vector<Effect *> &list, std::string &why) {
             p.colorIn = cur;
             if (p.toBack) {
                 if (&p == lastBack) p.toOut = true;
-                else { p.colorOut = 1 - cur; cur = 1 - cur; }
+                else {
+                    int nxt = x.direct ? (cur == 1 ? 2 : 1) : (cur == 0 ? 1 : 0);
+                    p.colorOut = nxt; cur = nxt;
+                }
             }
         }
     }
+    bool needC = false;
+    for (auto *e : list) for (auto &p : e->passes) if (p.toBack && !p.toOut && p.colorOut == 2) needC = true;
+    if (needC && !makeImage(x, x.C, x.fmt, x.w, x.h, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, x.B.vs != VK_NULL_HANDLE)) { why = "picture image C"; return false; }
+    auto imgOf = [&](int i) -> Img & { return i == 0 ? x.A : (i == 1 ? x.B : x.C); };
     for (auto *e : list) {
         auto &m = e->L.mod;
         size_t pi = 0;
         for (auto &t : m.techniques) {
             for (auto &rp : t.passes) {
                 Pass &p = e->passes[pi++];
-                std::vector<VkDescriptorImageInfo> ii(rp.sampler_bindings.size());
-                std::vector<VkWriteDescriptorSet> ws(rp.sampler_bindings.size());
-                for (size_t k = 0; k < rp.sampler_bindings.size(); k++) {
-                    const auto &sb = rp.sampler_bindings[k];
-                    const auto &s = m.samplers[sb.index];
-                    int ti = findTex(*e, s.texture_name);
-                    VkImageView v = VK_NULL_HANDLE;
-                    bool wantSrgb = s.srgb;
-                    if (ti >= 0 && e->tex[ti].kind == 1) {
-                        Img &im = p.colorIn == 0 ? x.A : x.B;
-                        v = wantSrgb && im.vs ? im.vs : im.v;
-                    } else if (ti >= 0 && e->tex[ti].kind == 2) {
-                        v = x.dummyDepth.v;
-                    } else if (ti >= 0) {
-                        Img &im = e->tex[ti].img;
-                        v = wantSrgb && im.vs ? im.vs : im.v;
-                    }
-                    if (!v) { why = "sampler without texture: " + s.name; return false; }
-                    ii[k] = { e->samp[sb.index], v, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                    ws[k] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-                    ws[k].dstSet = p.ds1; ws[k].dstBinding = sb.entry_point_binding; ws[k].descriptorCount = 1;
-                    ws[k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; ws[k].pImageInfo = &ii[k];
+                for (auto &sb : rp.sampler_bindings) {
+                    int ti = findTex(*e, m.samplers[sb.index].texture_name);
+                    if (ti >= 0 && e->tex[ti].kind == 1) p.usesBack = true;
                 }
-                if (!ws.empty()) x.f.UpdateDescriptorSets(x.dev, (uint32_t)ws.size(), ws.data(), 0, nullptr);
+                bool perSlot = x.direct && p.colorIn == 0 && p.usesBack;
+                size_t nsets = perSlot ? x.srcs.size() : 1;
+                if (perSlot) {
+                    std::vector<VkDescriptorSetLayout> ls(nsets, p.dsl1);
+                    p.dsv.resize(nsets);
+                    VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO }; ai.descriptorPool = e->pool; ai.descriptorSetCount = (uint32_t)nsets; ai.pSetLayouts = ls.data();
+                    if (x.f.AllocateDescriptorSets(x.dev, &ai, p.dsv.data()) != VK_SUCCESS) { why = "per-image descriptor sets"; return false; }
+                }
+                for (size_t si = 0; si < nsets; si++) {
+                    VkDescriptorSet dst = perSlot ? p.dsv[si] : p.ds1;
+                    std::vector<VkDescriptorImageInfo> ii(rp.sampler_bindings.size());
+                    std::vector<VkWriteDescriptorSet> ws(rp.sampler_bindings.size());
+                    for (size_t k = 0; k < rp.sampler_bindings.size(); k++) {
+                        const auto &sb = rp.sampler_bindings[k];
+                        const auto &s = m.samplers[sb.index];
+                        int ti = findTex(*e, s.texture_name);
+                        VkImageView v = VK_NULL_HANDLE;
+                        bool wantSrgb = s.srgb;
+                        if (ti >= 0 && e->tex[ti].kind == 1) {
+                            if (perSlot) v = x.srcs[si].v;
+                            else { Img &im = imgOf(p.colorIn); v = wantSrgb && im.vs ? im.vs : im.v; }
+                        } else if (ti >= 0 && e->tex[ti].kind == 2) {
+                            v = x.dummyDepth.v;
+                        } else if (ti >= 0) {
+                            Img &im = e->tex[ti].img;
+                            v = wantSrgb && im.vs ? im.vs : im.v;
+                        }
+                        if (!v) { why = "sampler without texture: " + s.name; return false; }
+                        ii[k] = { e->samp[sb.index], v, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                        ws[k] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                        ws[k].dstSet = dst; ws[k].dstBinding = sb.entry_point_binding; ws[k].descriptorCount = 1;
+                        ws[k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; ws[k].pImageInfo = &ii[k];
+                    }
+                    if (!ws.empty()) x.f.UpdateDescriptorSets(x.dev, (uint32_t)ws.size(), ws.data(), 0, nullptr);
+                }
             }
         }
     }
-    // passes that write the picture but are not the last: framebuffers on A or B (render pass of the pass itself)
+    // passes that write the picture but are not the last: framebuffers on B or C (or A)
     for (auto *e : list) {
         for (auto &p : e->passes) {
             if (!p.toBack || p.toOut) continue;
-            Img &im = p.colorOut == 0 ? x.A : x.B;
+            Img &im = imgOf(p.colorOut);
             VkFramebufferCreateInfo fi = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
             fi.renderPass = p.rp; fi.attachmentCount = 1; fi.pAttachments = &im.v; fi.width = x.w; fi.height = x.h; fi.layers = 1;
             if (x.f.CreateFramebuffer(x.dev, &fi, nullptr, &p.fb) != VK_SUCCESS) { why = "picture framebuffer"; return false; }
@@ -854,8 +885,10 @@ void destroyEffect(Fx &x, Effect &e) {
 // ---------------------------------------------------------------------------------------------------------------------
 
 // Returns a handle, or null when there is nothing to run (no effect enabled, or none could be set up).
+// srcs / nsrc: when given ("direct" mode) the effects read the game's own images (one per swapchain slot, all in SHADER_READ_ONLY when
+// recorded) and no picture image A exists; otherwise epifx_input() gives the image the upscaler must render into.
 API void *epifx_create(const char *root, const char *preset, void *gipa, void *inst, void *phys, void *dev,
-                       uint32_t w, uint32_t h, int fmt, uint64_t imgA, void *finalRp) {
+                       uint32_t w, uint32_t h, int fmt, void *finalRp, const uint64_t *srcs, uint32_t nsrc) {
     try {
         Preset pre = readPreset(preset ? preset : "");
         if (pre.effects.empty()) return nullptr;
@@ -871,20 +904,23 @@ API void *epifx_create(const char *root, const char *preset, void *gipa, void *i
 #undef X
         x.f.GetMemProps = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(get(in, "vkGetPhysicalDeviceMemoryProperties"));
         x.f.GetFormatProps = reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(get(in, "vkGetPhysicalDeviceFormatProperties"));
+        x.f.GetProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(get(in, "vkGetPhysicalDeviceProperties"));
         if (!x.f.GetMemProps) return nullptr;
         x.f.GetMemProps(x.phys, &x.mp);
-        x.w = w; x.h = h; x.fmt = (VkFormat)fmt; x.imgA = (VkImage)imgA; x.finalRp = reinterpret_cast<VkRenderPass>(finalRp);
+        x.w = w; x.h = h; x.fmt = (VkFormat)fmt; x.finalRp = reinterpret_cast<VkRenderPass>(finalRp);
         if (srgbOf(x.fmt) == VK_FORMAT_UNDEFINED) { LOGI("epifx: off, the swapchain format (%d) is not 8-bit UNORM", fmt); return nullptr; }
-
-        // picture images: A is the upscaler's image (views only), B is ours
-        x.A.owned = false; x.A.im = x.imgA; x.A.fmt = x.fmt; x.A.w = w; x.A.h = h;
-        VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-        vi.image = x.imgA; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = x.fmt; vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        if (x.f.CreateImageView(x.dev, &vi, nullptr, &x.A.v) != VK_SUCCESS) return nullptr;
-        vi.format = srgbOf(x.fmt);
-        if (x.f.CreateImageView(x.dev, &vi, nullptr, &x.A.vs) != VK_SUCCESS) return nullptr;
-        if (!makeImage(x, x.B, x.fmt, w, h, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, true)) { LOGI("epifx: off, picture image failed"); return nullptr; }
         if (!makeImage(x, x.dummyDepth, VK_FORMAT_R8_UNORM, 1, 1, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, false)) return nullptr;
+
+        x.direct = srcs && nsrc > 0;
+        if (x.direct) {
+            for (uint32_t i = 0; i < nsrc; i++) {
+                Img im; im.owned = false; im.im = (VkImage)srcs[i]; im.fmt = x.fmt; im.w = w; im.h = h;
+                VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+                vi.image = im.im; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = x.fmt; vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                if (x.f.CreateImageView(x.dev, &vi, nullptr, &im.v) != VK_SUCCESS) return nullptr;
+                x.srcs.push_back(im);
+            }
+        }
 
         std::string r = root ? root : "";
         std::vector<Effect *> used;
@@ -900,16 +936,38 @@ API void *epifx_create(const char *root, const char *preset, void *gipa, void *i
             LOGI("epifx: %s ready (%d passes, %lld ms)", name.c_str(), (int)e->passes.size(),
                  (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
             used.push_back(e.get());
+            x.names.push_back(name);
             x.fx.push_back(std::move(e));
         }
         std::string why;
-        bool anyBack = false;
-        for (auto *e : used) for (auto &p : e->passes) if (p.toBack) anyBack = true;
+        bool anyBack = false, needSrgb = false;
+        for (auto *e : used) {
+            for (auto &p : e->passes) if (p.toBack) anyBack = true;
+            for (auto &s : e->L.mod.samplers) {
+                int ti = findTex(*e, s.texture_name);
+                if (s.srgb && ti >= 0 && e->tex[ti].kind == 1) needSrgb = true;
+            }
+        }
         if (used.empty() || !anyBack) { LOGI("epifx: off, nothing to run"); return nullptr; }
+        // The picture images only get a second (sRGB) view format when an effect really asks for it: images that can change format
+        // lose the GPU's lossless compression on some drivers, which makes every full-screen read and write dearer.
+        if (x.direct && needSrgb) LOGI("epifx: an effect asks for sRGB reads of the picture; direct mode reads it as plain colour");
+        bool srgbImgs = needSrgb && !x.direct;
+        if (!x.direct && !makeImage(x, x.A, x.fmt, w, h, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, srgbImgs)) { LOGI("epifx: off, picture image failed"); return nullptr; }
+        if (!makeImage(x, x.B, x.fmt, w, h, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, srgbImgs)) { LOGI("epifx: off, picture image failed"); return nullptr; }
         if (!wire(x, used, why)) { LOGI("epifx: off, %s", why.c_str()); return nullptr; }
         h2->order = used;
+
+        // GPU timing per effect (logged every few hundred frames)
+        if (x.f.GetProps) {
+            VkPhysicalDeviceProperties pp; x.f.GetProps(x.phys, &pp);
+            x.period = pp.limits.timestampPeriod;
+            VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO }; qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = (uint32_t)used.size() * 2;
+            if (x.f.CreateQueryPool(x.dev, &qi, nullptr, &x.qp) == VK_SUCCESS) { x.nq = qi.queryCount; x.accMs.assign(used.size(), 0); x.accN.assign(used.size(), 0); }
+            else x.qp = VK_NULL_HANDLE;
+        }
         x.t0 = x.last = std::chrono::steady_clock::now();
-        LOGI("epifx: %d effects, %dx%d", (int)used.size(), (int)w, (int)h);
+        LOGI("epifx: %d effects, %dx%d, %s", (int)used.size(), (int)w, (int)h, x.direct ? "direct (no extra copy of the picture)" : "after the upscaler");
         return h2.release();
     } catch (const std::exception &ex) {
         LOGI("epifx: off, exception: %s", ex.what());
@@ -917,6 +975,14 @@ API void *epifx_create(const char *root, const char *preset, void *gipa, void *i
         LOGI("epifx: off, unknown exception");
     }
     return nullptr;
+}
+
+// The image the upscaler's last pass has to render into (not in direct mode).
+API int epifx_input(void *hp, uint64_t *image, uint64_t *view) {
+    auto *h = static_cast<Handle *>(hp);
+    if (h->x.direct || !h->x.A.im) return -1;
+    *image = (uint64_t)h->x.A.im; *view = (uint64_t)h->x.A.v;
+    return 0;
 }
 
 // One-time: puts the textures in their resting layout and uploads the pictures (runs on the present thread, with the queue).
@@ -957,6 +1023,7 @@ API int epifx_upload(void *hp, void *queue, uint32_t family) {
           f.CmdCopyBufferToImage(cb, sb, x.dummyDepth.im, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c); }
         toRead(x.dummyDepth, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         barrierImage(x, cb, x.B.im, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1);
+        if (x.C.im) barrierImage(x, cb, x.C.im, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1);
 
         for (auto *e : h->order) {
             for (auto &t : e->tex) {
@@ -990,19 +1057,26 @@ API int epifx_upload(void *hp, void *queue, uint32_t family) {
     } catch (...) { return -1; }
 }
 
-// Records all passes. Call after the upscaler wrote its picture into image A (which is left in SHADER_READ_ONLY_OPTIMAL).
-// The last pass renders into `outFramebuffer` (the swapchain image) with the render pass given to epifx_create.
-API void epifx_record(void *hp, void *cbp, uint64_t outFramebuffer) {
+// Records all passes. Call after the picture is ready: in image A (left in SHADER_READ_ONLY_OPTIMAL) or, in direct mode, in the game's
+// image number `slot` (also in SHADER_READ_ONLY_OPTIMAL). The last pass renders into `outFramebuffer` (the swapchain image) with the
+// render pass given to epifx_create.
+API void epifx_record(void *hp, void *cbp, uint64_t outFramebuffer, uint32_t slot) {
     auto *h = static_cast<Handle *>(hp);
     Fx &x = h->x;
     auto &f = x.f;
     VkCommandBuffer cb = reinterpret_cast<VkCommandBuffer>(cbp);
-    // the images and render targets are shared by every frame: wait for the previous frame's use first
+    // the render targets and picture images are shared by every frame: wait for the previous frame's use of them (only the stages
+    // that can touch them, not everything)
     VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-    mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT; mb.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
-    f.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    const VkPipelineStageFlags st = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    f.CmdPipelineBarrier(cb, st, st, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    if (x.qp) f.CmdResetQueryPool(cb, x.qp, 0, x.nq);
     VkClearValue clr[8]; memset(clr, 0, sizeof clr);
+    uint32_t ei = 0;
     for (auto *e : h->order) {
+        if (x.qp) f.CmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, x.qp, ei * 2);
         for (auto &p : e->passes) {
             VkRenderPassBeginInfo rb = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
             if (p.toOut) { rb.renderPass = x.finalRp; rb.framebuffer = reinterpret_cast<VkFramebuffer>(outFramebuffer); }
@@ -1011,12 +1085,14 @@ API void epifx_record(void *hp, void *cbp, uint64_t outFramebuffer) {
             rb.clearValueCount = 8; rb.pClearValues = clr;
             f.CmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
             f.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p.pipe);
-            VkDescriptorSet ds[2] = { e->ds0, p.ds1 };
+            VkDescriptorSet ds[2] = { e->ds0, (!p.dsv.empty() && slot < p.dsv.size()) ? p.dsv[slot] : p.ds1 };
             f.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p.pl, 0, 2, ds, 0, nullptr);
             f.CmdDraw(cb, p.nv, 1, 0, 0);
             f.CmdEndRenderPass(cb);
             for (int ti : p.mipTargets) genMips(x, cb, e->tex[ti].img, true, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
         }
+        if (x.qp) f.CmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, x.qp, ei * 2 + 1);
+        ei++;
     }
 }
 
@@ -1046,6 +1122,27 @@ API void epifx_tick(void *hp) {
         }
         memcpy(e->map, e->uboCpu.data(), e->uboCpu.size());
     }
+    // GPU time of each effect, from the timestamps of the frames that have finished
+    if (x.qp) {
+        std::vector<uint64_t> buf(x.nq * 2, 0);
+        x.f.GetQueryPoolResults(x.dev, x.qp, 0, x.nq, buf.size() * 8, buf.data(), 16, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        for (uint32_t i = 0; i < x.accMs.size(); i++) {
+            uint64_t a0 = buf[(2 * i) * 2], av0 = buf[(2 * i) * 2 + 1], a1 = buf[(2 * i + 1) * 2], av1 = buf[(2 * i + 1) * 2 + 1];
+            if (av0 && av1 && a1 >= a0) { x.accMs[i] += (double)(a1 - a0) * x.period / 1e6; x.accN[i]++; }
+        }
+        if (x.frame % 600 == 0) {
+            std::string line; double total = 0; uint32_t n = 0;
+            for (uint32_t i = 0; i < x.accMs.size(); i++) {
+                if (!x.accN[i]) continue;
+                double avg = x.accMs[i] / x.accN[i];
+                total += avg; n = std::max(n, x.accN[i]);
+                char b[96]; snprintf(b, sizeof b, "%s %.2f ms, ", x.names[i].c_str(), avg);
+                line += b;
+                x.accMs[i] = 0; x.accN[i] = 0;
+            }
+            if (n) LOGI("epifx: GPU time per frame: %stotal %.2f ms (%u samples)", line.c_str(), total, n);
+        }
+    }
 }
 
 API void epifx_destroy(void *hp) {
@@ -1053,10 +1150,10 @@ API void epifx_destroy(void *hp) {
     if (!h) return;
     Fx &x = h->x;
     for (auto &e : x.fx) destroyEffect(x, *e);
-    freeImage(x, x.B);
+    if (x.qp) x.f.DestroyQueryPool(x.dev, x.qp, nullptr);
+    freeImage(x, x.A); freeImage(x, x.B); freeImage(x, x.C);
     freeImage(x, x.dummyDepth);
-    if (x.A.v) x.f.DestroyImageView(x.dev, x.A.v, nullptr);
-    if (x.A.vs) x.f.DestroyImageView(x.dev, x.A.vs, nullptr);
+    for (auto &im : x.srcs) freeImage(x, im);
     delete h;
 }
 

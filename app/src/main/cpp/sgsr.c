@@ -190,9 +190,10 @@ static int lg_load(void) {
 
 /* ---------- EpiShaders (libepifx.so, loaded when LAS_EPI=1): ReShade effects run after the upscale ---------- */
 static struct {
-    void *(*create)(const char *, const char *, void *, void *, void *, void *, uint32_t, uint32_t, int, uint64_t, void *);
+    void *(*create)(const char *, const char *, void *, void *, void *, void *, uint32_t, uint32_t, int, void *, const uint64_t *, uint32_t);
+    int (*input)(void *, uint64_t *, uint64_t *);
     int (*upload)(void *, void *, uint32_t);
-    void (*record)(void *, void *, uint64_t);
+    void (*record)(void *, void *, uint64_t, uint32_t);
     void (*tick)(void *);
     void (*destroy)(void *);
     int state;
@@ -210,9 +211,9 @@ static int epi_load(void) {
     EP.state = -1;
     void *h = dlopen(getenv("LAS_EPI_LIB"), RTLD_NOW | RTLD_LOCAL);
     if (!h) { LOGI("epifx: off, can't load the library: %s", dlerror()); return 0; }
-    EP.create = (void *)dlsym(h, "epifx_create"); EP.upload = (void *)dlsym(h, "epifx_upload"); EP.record = (void *)dlsym(h, "epifx_record");
+    EP.create = (void *)dlsym(h, "epifx_create"); EP.upload = (void *)dlsym(h, "epifx_upload"); EP.input = (void *)dlsym(h, "epifx_input"); EP.record = (void *)dlsym(h, "epifx_record");
     EP.tick = (void *)dlsym(h, "epifx_tick"); EP.destroy = (void *)dlsym(h, "epifx_destroy");
-    if (!EP.create || !EP.upload || !EP.record || !EP.tick || !EP.destroy) { LOGI("epifx: off, library incomplete"); return 0; }
+    if (!EP.create || !EP.input || !EP.upload || !EP.record || !EP.tick || !EP.destroy) { LOGI("epifx: off, library incomplete"); return 0; }
     EP.state = 1;
     return 1;
 }
@@ -240,7 +241,7 @@ typedef struct {
     VkCommandBuffer cpy[MAXIMG][2], cmdg[MAXIMG]; VkSemaphore semg[MAXIMG], acq[MAXIMG];
     unsigned long presents;
     /* EpiShaders: the chain's picture goes into eimg first, the effects then render into the swapchain image */
-    void *epi; int epiUp; VkImage eimg; VkDeviceMemory emem; VkImageView eview; VkFramebuffer efb;
+    void *epi; int epiUp, edirect; VkImageView eview; VkFramebuffer efb;   /* eview: the effects' input image (owned by libepifx), not in direct mode */
 } Sg;
 static Sg g_sg[MAXSC];
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -273,11 +274,8 @@ static int sgsr_mode(void) {
 /* frees everything except the real swapchain itself */
 static void teardown(Sg *c) {
     VkDevice d = c->dev;
-    if (c->epi && EP.destroy) EP.destroy(c->epi);
     if (c->efb) F.DestroyFramebuffer(d, c->efb, NULL);
-    if (c->eview) F.DestroyImageView(d, c->eview, NULL);
-    if (c->eimg) F.DestroyImage(d, c->eimg, NULL);
-    if (c->emem) F.FreeMemory(d, c->emem, NULL);
+    if (c->epi && EP.destroy) EP.destroy(c->epi);
     if (c->pool) F.DestroyCommandPool(d, c->pool, NULL);           /* frees its command buffers */
     if (c->ctx > 0 && LG.del) LG.del(c->ctx);
     for (int i = 0; i < MAXIMG; i++) {
@@ -394,11 +392,9 @@ static void rec(Sg *c, VkCommandBuffer cb2, uint32_t slot, uint32_t fbi, int gen
         F.CmdDraw(cb2, 3, 1, 0, 0);
         F.CmdEndRenderPass(cb2);
     }
-    if (c->epi) {                                          /* the last pass writes image E; the effects follow and write the swapchain image */
-        VkMemoryBarrier mbe = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
-            .dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT };
-        F.CmdPipelineBarrier(cb2, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mbe, 0, NULL, 0, NULL);
-    }
+    if (c->epi && c->edirect) {                            /* nothing to scale: the effects read the game's image and write the swapchain image */
+        EP.record(c->epi, cb2, (uint64_t)c->fb[fbi], slot);
+    } else {
     VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = c->epi ? c->rpm : c->rp,
         .framebuffer = c->epi ? c->efb : c->fb[fbi],
         .renderArea = { { 0, 0 }, c->out }, .clearValueCount = 1, .pClearValues = &black };
@@ -410,7 +406,8 @@ static void rec(Sg *c, VkCommandBuffer cb2, uint32_t slot, uint32_t fbi, int gen
     else F.CmdPushConstants(cb2, c->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, c->vinfo);
     F.CmdDraw(cb2, 3, 1, 0, 0);
     F.CmdEndRenderPass(cb2);
-    if (c->epi) EP.record(c->epi, cb2, (uint64_t)c->fb[fbi]);
+    if (c->epi) EP.record(c->epi, cb2, (uint64_t)c->fb[fbi], slot);
+    }
     /* hand the image back: the game's in PRESENT_SRC, the generated one in GENERAL for the next generation */
     VkImageMemoryBarrier b2 = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_SHADER_READ_BIT, .dstAccessMask = gen ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) : 0,
@@ -510,31 +507,23 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
         ST("create framebuffer", F.CreateFramebuffer(d, &fi, NULL, &c->fb[i]));
     }
     if (epi_wanted() && epi_load()) {
-        VkImageCreateInfo ei = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, .imageType = VK_IMAGE_TYPE_2D,
-            .format = c->fmt, .extent = { c->out.width, c->out.height, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
-            .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
-        VkMemoryRequirements emr;
-        if (F.CreateImage(d, &ei, NULL, &c->eimg) == VK_SUCCESS) {
-            F.GetImageMemoryRequirements(d, c->eimg, &emr);
-            VkMemoryAllocateInfo eai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = emr.size, .memoryTypeIndex = pick_memtype(d, emr.memoryTypeBits) };
-            VkImageViewCreateInfo evc = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = c->eimg, .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                .format = c->fmt, .subresourceRange = rng };
-            if (F.AllocateMemory(d, &eai, NULL, &c->emem) == VK_SUCCESS && F.BindImageMemory(d, c->eimg, c->emem, 0) == VK_SUCCESS &&
-                F.CreateImageView(d, &evc, NULL, &c->eview) == VK_SUCCESS) {
-                void *phys = vkshim_phys_of(d), *gipa = vkshim_real_proc("vkGetInstanceProcAddr");
-                c->epi = (phys && gipa && g_inst) ? EP.create(getenv("LAS_EPI_ROOT"), getenv("LAS_EPI_PRESET"), gipa, g_inst, phys, d,
-                                                              c->out.width, c->out.height, (int)c->fmt, (uint64_t)c->eimg, (void *)c->rp) : NULL;
-            }
+        /* Direct mode: when there is nothing to scale (same size, no upscaler, no black bars, no frame generation) the effects read the
+         * game's images themselves, which saves a whole full-screen copy of the picture. */
+        int direct = c->mode == 3 && !c->fx && !c->lg && c->in.width == c->out.width && c->in.height == c->out.height &&
+                     c->rect.offset.x == 0 && c->rect.offset.y == 0 && c->rect.extent.width == c->out.width && c->rect.extent.height == c->out.height;
+        uint64_t srcs[MAXI];
+        for (uint32_t i = 0; i < n; i++) srcs[i] = (uint64_t)c->pimg[i];
+        void *phys = vkshim_phys_of(d), *gipa = vkshim_real_proc("vkGetInstanceProcAddr");
+        c->epi = (phys && gipa && g_inst) ? EP.create(getenv("LAS_EPI_ROOT"), getenv("LAS_EPI_PRESET"), gipa, g_inst, phys, d,
+                                                      c->out.width, c->out.height, (int)c->fmt, (void *)c->rp, direct ? srcs : NULL, direct ? n : 0) : NULL;
+        if (c->epi && !direct) {
+            uint64_t im = 0, vw = 0;
+            if (EP.input(c->epi, &im, &vw) == 0) c->eview = (VkImageView)vw;
+            else { EP.destroy(c->epi); c->epi = NULL; }
         }
-        if (!c->epi) {
-            if (c->eview) F.DestroyImageView(d, c->eview, NULL);
-            if (c->eimg) F.DestroyImage(d, c->eimg, NULL);
-            if (c->emem) F.FreeMemory(d, c->emem, NULL);
-            c->eview = VK_NULL_HANDLE; c->eimg = VK_NULL_HANDLE; c->emem = VK_NULL_HANDLE;
-        }
+        c->edirect = c->epi && direct;
     }
-    if (c->fx || c->mode == 2 || c->epi) {
+    if (c->fx || c->mode == 2 || (c->epi && !c->edirect)) {
         VkAttachmentDescription am = ad;
         am.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         VkSubpassDependency dm[2] = {
@@ -547,7 +536,7 @@ static int build(Sg *c, VkImageUsageFlags gameUsage) {
         VkRenderPassCreateInfo rpm = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &am,
             .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = 2, .pDependencies = dm };
         ST("create intermediate render pass", F.CreateRenderPass(d, &rpm, NULL, &c->rpm));
-        if (c->epi) {
+        if (c->epi && !c->edirect) {
             VkFramebufferCreateInfo fe = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = c->rpm, .attachmentCount = 1,
                 .pAttachments = &c->eview, .width = c->out.width, .height = c->out.height, .layers = 1 };
             ST("create effects framebuffer", F.CreateFramebuffer(d, &fe, NULL, &c->efb));
