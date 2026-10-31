@@ -880,6 +880,7 @@ class MainActivity : Activity() {
         header(box, "Game")
         action(box, "Name", GameMeta.name(this, pkg)) { renameGame(pkg) }
         action(box, "Icon", if (GameMeta.hasCustomIcon(this, pkg)) "Custom picture" else "The game's own") { chooseIcon(pkg) }
+        action(box, "Files", "Browse this game's data and OBB") { startActivity(Intent(this, FileManagerActivity::class.java).putExtra("pkg", pkg)) }
         action(box, "Add shortcut to the home screen", "Starts this game directly") { pinShortcut(pkg) }
         action(box, "Play with the old basic launcher", "Only if the normal start doesn't work") { startLegacyNative(pkg) }
         header(box, "This game's settings")
@@ -902,7 +903,7 @@ class MainActivity : Activity() {
         header(box, "Games")
         action(box, "Import game", "APK files and OBB") { pickApk() }
         action(box, "Imported list", "What was imported and how it was read") { showImported(outView) }
-        action(box, "File manager", "Browse the game's files") { startActivity(Intent(this, FileManagerActivity::class.java)) }
+        action(box, "File manager", "Browse every game's files") { startActivity(Intent(this, FileManagerActivity::class.java)) }
         header(box, "Logs")
         action(box, "Guest log", "Copies the game's log: send this when something is wrong") { GuestLog.copy(this, outView) }
         action(box, "Show log", "The last lines of the phone's log, here") { showLog() }

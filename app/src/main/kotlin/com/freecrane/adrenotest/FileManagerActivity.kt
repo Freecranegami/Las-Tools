@@ -81,8 +81,8 @@ class FileManagerActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(row(btn("Up") { up() }, pasteBtn, btn("New folder") { newItem(true) }, btn("New file") { newItem(false) }))
             addView(row(btn("Copy") { setClip(false) }, btn("Cut") { setClip(true) }, btn("Delete") { deleteSelected() }, btn("Select all") { selectAll() }))
-            addView(row(btn("App files") { go(root) }, btn("Game files") { go(gameDir("ext/data/files", true)) },
-                btn("Asset packs") { go(gameDir("packs", false)) }, btn("Import here") { importHere() }))
+            addView(row(btn("App files") { go(root) }, btn("Game data") { go(gameDir("ext/data/files", true)) },
+                btn("Games") { go(File(root, "guests")) }, btn("Import here") { importHere() }))
         }
         val rootView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -96,13 +96,21 @@ class FileManagerActivity : Activity() {
     }
 
     // starts in the game's own data folder when it exists
+    // (a game's page passes its package and opens that game's folder; otherwise the list of games)
     private fun startDir() {
-        val d = gameDir("ext/data/files", false)
-        if (d != null && d.isDirectory) cwd = d
+        val pkg = intent?.getStringExtra("pkg")
+        val games = File(root, "guests")
+        val d = if (pkg != null) File(games, pkg) else games
+        if (d.isDirectory) cwd = d.canonicalFile
     }
 
     private fun gameDir(sub: String, create: Boolean): File? {
-        val pkg = File(root, "guests").listFiles()?.filter { it.isDirectory }?.minByOrNull { it.name } ?: return null
+        val games = File(root, "guests")
+        // the game whose folder we are in, else the one the page was opened for, else the first
+        val here = cwd.path.removePrefix(games.path + File.separator).takeIf { cwd.path.startsWith(games.path + File.separator) }?.substringBefore(File.separatorChar)
+        val named = here ?: intent?.getStringExtra("pkg")
+        val pkg = (named?.let { File(games, it) }?.takeIf { it.isDirectory })
+            ?: games.listFiles()?.filter { it.isDirectory }?.minByOrNull { it.name } ?: return null
         val d = File(pkg, sub)
         if (create) d.mkdirs()
         return if (d.isDirectory) d else null
@@ -133,7 +141,7 @@ class FileManagerActivity : Activity() {
         val all = cwd.listFiles()?.toList() ?: emptyList()
         entries = all.sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase() }))
         selected.retainAll(entries.toSet())
-        val rel = if (cwd.path == root.path) "files/" else "files/" + cwd.path.removePrefix(root.path + File.separator) + "/"
+        val rel = if (cwd.path == root.path) "files/" else "files/" + cwd.path.removePrefix(root.path + File.separator).removePrefix("guests").removePrefix("/") + "/"
         pathText.text = rel
         statusText.text = "${entries.size} items" + (if (selected.isNotEmpty()) " - ${selected.size} selected" else "") +
             (if (clip.isNotEmpty()) " - clipboard: ${clip.size} (${if (clipCut) "cut" else "copy"})" else "") +
@@ -174,7 +182,9 @@ class FileManagerActivity : Activity() {
             val f = entries[position]
             val name = TextView(this@FileManagerActivity).apply {
                 textSize = 15f
-                text = if (f.isDirectory) f.name + "/" else f.name
+                text = if (f.isDirectory && f.parentFile?.name == "guests" && f.parentFile?.parentFile?.path == root.path)
+                    GameMeta.name(this@FileManagerActivity, f.name) + "  (" + f.name + ")"
+                else if (f.isDirectory) f.name + "/" else f.name
                 if (f.isDirectory) setTypeface(typeface, android.graphics.Typeface.BOLD)
             }
             val info = TextView(this@FileManagerActivity).apply {
