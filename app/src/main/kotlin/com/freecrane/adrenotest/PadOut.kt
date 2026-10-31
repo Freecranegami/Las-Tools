@@ -5,13 +5,17 @@ import android.content.Context
 import android.os.Handler
 import android.os.Parcel
 import android.os.SystemClock
+import android.graphics.PixelFormat
+import android.os.Build
 import android.util.Log
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.util.SparseArray
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewGroup
-import java.util.Collections
 import java.util.WeakHashMap
 
 // A made-up Xbox 360 controller that the game sees as plugged in. The data comes from the on-screen controller.
@@ -196,19 +200,47 @@ class PadOut(private val act: Activity) {
     }
 }
 
-// Puts the controller on top of a game's activity.
+// Puts the controller on top of a game's activity. It is a window of its own, not a view inside the game's window: a native game
+// owns its window's surface, so nothing added to that window would ever be drawn.
 object PadOverlay {
-    private val done: MutableSet<Activity> = Collections.newSetFromMap(WeakHashMap())
+    private val views = WeakHashMap<Activity, PadView>()
 
     fun attach(a: Activity) {
         try {
-            if (!Pad.on(HostApp.instance) || !done.add(a)) return
+            if (!Pad.on(HostApp.instance) || views.containsKey(a)) return
             val ok = PadDevice.ensure(HostApp.instance)
             val v = PadView(a, false, PadOut(a))
-            a.addContentView(v, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            Log.i("GuestHost", "pad: on-screen controller added (${a.javaClass.simpleName}), fake Xbox 360 device ${if (ok) "registered" else "NOT registered"}")
+            views[a] = v
+            val decor = a.window.decorView
+            val add = Runnable {
+                try {
+                    val lp = WindowManager.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                        PixelFormat.TRANSLUCENT)
+                    lp.token = decor.windowToken
+                    lp.gravity = Gravity.TOP or Gravity.START
+                    lp.title = "LasPad"
+                    if (Build.VERSION.SDK_INT >= 28) lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    a.windowManager.addView(v, lp)
+                    Log.i("GuestHost", "pad: on-screen controller added (${a.javaClass.simpleName}), fake Xbox 360 device ${if (ok) "registered" else "NOT registered"}")
+                } catch (t: Throwable) {
+                    Log.w("GuestHost", "pad: couldn't add the controller window: $t")
+                }
+            }
+            if (decor.windowToken != null) add.run()
+            else decor.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(x: View) { decor.removeOnAttachStateChangeListener(this); decor.post(add) }
+                override fun onViewDetachedFromWindow(x: View) { }
+            })
         } catch (t: Throwable) {
             Log.w("GuestHost", "pad: couldn't add the controller: $t")
         }
+    }
+
+    fun detach(a: Activity) {
+        val v = views.remove(a) ?: return
+        try { a.windowManager.removeViewImmediate(v) } catch (_: Throwable) { }
     }
 }

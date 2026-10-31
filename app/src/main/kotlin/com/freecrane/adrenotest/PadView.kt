@@ -197,7 +197,7 @@ class PadView(ctx: Context, private val edit: Boolean, private val out: PadOut?)
         }
         push()
         invalidate()
-        return took || bound.isNotEmpty()
+        return true          // the controller covers the whole screen: the game gets no touches while it is on
     }
 
     private fun pressEl(e: Pad.El, px: Float, py: Float, first: Boolean) {

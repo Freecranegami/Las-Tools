@@ -111,7 +111,7 @@ private object GuestSwap : Application.ActivityLifecycleCallbacks {
     override fun onActivityPaused(activity: Activity) = life("PAUSED", activity)
     override fun onActivityStopped(activity: Activity) = life("STOPPED", activity)
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-    override fun onActivityDestroyed(activity: Activity) = life("DESTROYED", activity)
+    override fun onActivityDestroyed(activity: Activity) { PadOverlay.detach(activity); life("DESTROYED", activity) }
 }
 
 // The phone's log buffer is small, so by the time the log is read after a long run the launch lines
