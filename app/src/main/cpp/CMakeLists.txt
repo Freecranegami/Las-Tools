@@ -34,3 +34,12 @@ target_compile_definitions(vkshim PRIVATE VK_NO_PROTOTYPES)
 target_link_libraries(vkshim dl log m)
 
 add_subdirectory(lsfg)
+
+# EpiShaders: ReShade effects (compiled with ReShade's own compiler) run as extra passes after the upscaler.
+file(GLOB EPIFX_SRC "${CMAKE_CURRENT_SOURCE_DIR}/epifx/reshadefx/*.cpp")
+list(FILTER EPIFX_SRC EXCLUDE REGEX "fxtest")
+add_library(epifx SHARED epifx/epifx.cpp ${EPIFX_SRC})
+target_compile_features(epifx PRIVATE cxx_std_20)
+target_include_directories(epifx PRIVATE epifx epifx/reshadefx epifx/spirv)
+target_compile_options(epifx PRIVATE -fvisibility=hidden -fexceptions -frtti -Wno-everything)
+target_link_libraries(epifx log android dl)

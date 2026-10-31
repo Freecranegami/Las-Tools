@@ -496,7 +496,7 @@ class MainActivity : Activity() {
                 else "Upscaler: ${Tweaks.upscalers[which]}. Whenever the game renders smaller than the screen (the Resolution you set here, " +
                     "or the game's own resolution option) the picture is upscaled to the screen. " +
                     (if (Tweaks.resW(this) <= 0) "With Resolution on Native it only works if the game itself is set below the screen size. " else "") +
-                    "CAS is not used while an upscaler works. Applies the next time the game starts. If the screen goes black, turn the upscaler off."
+                    "Applies the next time the game starts. If the screen goes black, turn the upscaler off."
             }
             .show()
     }
@@ -601,19 +601,6 @@ class MainActivity : Activity() {
                    else "Steady resolution OFF: the game changes its own resolution as it likes. Applies the next time the game starts."
     }
 
-    private fun chooseCas(out: TextView) {
-        val labels = Tweaks.casLevels.map { it.label }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("CAS sharpening")
-            .setSingleChoiceItems(labels, Tweaks.casIndex(this)) { d, which ->
-                Tweaks.setCas(this, which)
-                out.text = "CAS: ${labels[which]}. Applies the next time the game starts. " +
-                    "If the screen goes black, set it back to Off."
-                d.dismiss()
-            }
-            .show()
-    }
-
     private fun chooseCpu(out: TextView) {
         val labels = GpuSpoof.cpus.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
@@ -716,7 +703,6 @@ class MainActivity : Activity() {
         action(b, "Resolution", if (rw > 0 && rh > 0) "$rw x $rh" else "Native") { chooseResolution(outView) }
         action(b, "Upscaler (SGSR / FSR)", Tweaks.upscalers[Tweaks.upscaler(this)].substringBefore(" (")) { chooseUpscaler(outView) }
         action(b, "RCAS sharpness (FSR 1)", "${Tweaks.rcasPercent(this)} %") { chooseRcas(outView) }
-        action(b, "CAS sharpening", Tweaks.casLevels[Tweaks.casIndex(this)].label) { chooseCas(outView) }
         toggle(b, "FXAA", "Smooths jagged edges", { Tweaks.fxaa(this) }) { toggleFxaa(outView) }
         toggle(b, "Stretch to fit", "Off keeps the picture's ratio with black bars", { Tweaks.stretch(this) }) { toggleStretch(outView) }
         toggle(b, "Steady resolution", "Stops the game's dynamic resolution from dropping", { Tweaks.drsLock(this) }) { toggleDrs(outView) }
@@ -732,6 +718,93 @@ class MainActivity : Activity() {
             action(b, "Import Lossless.dll", if (Lsfg.installed(this)) "Imported" else "Not imported") { importLossless(outView) }
             action(b, "Check Lossless.dll", "Tests that the shaders can be used on this phone") { checkLossless(outView) }
         }
+    }
+
+    // ----- EpiShaders: a switch for each effect, its own settings appear underneath while it is on -----
+
+    private fun addEpi(b: LinearLayout) {
+        header(b, "EpiShaders")
+        toggle(b, "EpiShaders", "Master switch: off turns every effect off without forgetting your choices",
+            { Epi.master(this) }) { Epi.setMaster(this, !Epi.master(this)); refreshPage() }
+        b.addView(label("Effects run on the finished picture, after the upscaler. Each one costs some speed. Applies the next time the game starts. " +
+            "If the screen goes black, turn the effect off." + (if (Epi.enabledCount(this) > 0 && !Epi.master(this)) " (Master switch is off, so none of the chosen effects run.)" else ""),
+            12f, cSub).apply { setPadding(dp(4), 0, dp(4), dp(8)) })
+        for (g in Epi.groups) {
+            header(b, g.title)
+            for (e in g.effects) {
+                toggle(b, e.name, e.info, { Epi.on(this, e.id) }) { Epi.setOn(this, e.id, !Epi.on(this, e.id)); refreshPage() }
+                if (Epi.on(this, e.id)) addEpiParams(b, e)
+            }
+        }
+    }
+
+    private fun addEpiParams(b: LinearLayout, e: Epi.Effect) {
+        val ps = Epi.params(this, e.id)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = roundBg(cBar, 12); setPadding(dp(14), dp(8), dp(14), dp(10))
+        }
+        b.addView(box, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8); leftMargin = dp(10) })
+        if (ps == null) {
+            box.addView(label("This effect's settings couldn't be read. It may still run with its defaults.", 12f, cSub))
+            return
+        }
+        if (ps.isEmpty()) box.addView(label("No settings.", 12f, cSub))
+        var lastCat = ""
+        for (p in ps) {
+            if (p.cat.isNotEmpty() && p.cat != lastCat) {
+                lastCat = p.cat
+                box.addView(label(p.cat, 12f, cAccent, true).apply { setPadding(0, dp(10), 0, dp(2)) })
+            }
+            val cur = Epi.value(this, e.id, p.name) ?: p.def
+            val isInt = p.type == "int" || p.type == "uint"
+            if (p.items.isNotEmpty() && p.rows == 1) {
+                val row = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; isClickable = true; setPadding(0, dp(8), 0, dp(8)) }
+                val idx = cur[0].toInt().coerceIn(0, p.items.size - 1)
+                row.addView(label(p.label, 14f, cText))
+                row.addView(label(p.items[idx] + "  ›", 12f, cSub))
+                row.setOnClickListener {
+                    AlertDialog.Builder(this).setTitle(p.label)
+                        .setSingleChoiceItems(p.items.toTypedArray(), idx) { d, which ->
+                            Epi.setValue(this, e.id, p.name, doubleArrayOf(which.toDouble())); d.dismiss(); refreshPage()
+                        }.show()
+                }
+                box.addView(row)
+            } else if (p.type == "bool" || p.ui == "checkbox") {
+                val sw = android.widget.Switch(this).apply { text = p.label; setTextColor(cText); isChecked = cur[0] != 0.0; setPadding(0, dp(8), 0, dp(8)) }
+                sw.setOnCheckedChangeListener { _, on -> Epi.setValue(this, e.id, p.name, doubleArrayOf(if (on) 1.0 else 0.0)) }
+                box.addView(sw)
+            } else {
+                val comps = p.rows.coerceIn(1, 4)
+                val names = if (p.ui == "color") listOf("red", "green", "blue", "alpha") else listOf("x", "y", "z", "w")
+                for (ci in 0 until comps) {
+                    val mn = p.min ?: 0.0
+                    val mx = p.max ?: (if (p.ui == "color") 1.0 else maxOf(1.0, (p.def.getOrElse(ci) { 1.0 }) * 3.0))
+                    val st = p.step?.takeIf { it > 0.0 } ?: if (isInt) 1.0 else (mx - mn) / 200.0
+                    val n = Math.round((mx - mn) / st).toInt().coerceIn(1, 2000)
+                    val v0 = cur.getOrElse(ci) { cur.lastOrNull() ?: 0.0 }
+                    fun fmt(v: Double) = if (isInt) v.toLong().toString() else "%.3g".format(java.util.Locale.US, v)
+                    val title = p.label + (if (comps > 1) " (${names[ci]})" else "")
+                    val head = label("$title: ${fmt(v0)}", 13f, cText).apply { setPadding(0, dp(8), 0, 0) }
+                    val bar = android.widget.SeekBar(this).apply { max = n; progress = Math.round((v0 - mn) / st).toInt().coerceIn(0, n) }
+                    fun valueAt(pr: Int) = (mn + pr * st).coerceIn(mn, mx)
+                    bar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                        override fun onProgressChanged(sb: android.widget.SeekBar?, pr: Int, user: Boolean) { head.text = "$title: ${fmt(valueAt(pr))}" }
+                        override fun onStartTrackingTouch(sb: android.widget.SeekBar?) { }
+                        override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                            val a = (Epi.value(this@MainActivity, e.id, p.name) ?: p.def).copyOf(maxOf(comps, p.def.size))
+                            a[ci] = valueAt(bar.progress)
+                            Epi.setValue(this@MainActivity, e.id, p.name, a)
+                        }
+                    })
+                    box.addView(head)
+                    box.addView(bar)
+                }
+            }
+            if (p.tip.isNotEmpty() && p.tip.length <= 110) box.addView(label(p.tip, 11f, cSub))
+        }
+        val reset = label("Reset this effect's settings", 13f, cAccent).apply { setPadding(0, dp(12), 0, dp(2)); isClickable = true }
+        reset.setOnClickListener { Epi.resetEffect(this, e.id); refreshPage() }
+        box.addView(reset)
     }
 
     private fun addDevice(b: LinearLayout) {
@@ -812,6 +885,7 @@ class MainActivity : Activity() {
         header(box, "This game's settings")
         box.addView(label("Changes here affect only this game. Anything you never change here follows the defaults from the menu.", 12f, cSub).apply { setPadding(dp(4), 0, dp(4), dp(8)) })
         addGraphics(box)
+        addEpi(box)
         addFrameGen(box, false)
         addDevice(box)
         action(box, "Reset this game's settings", "Go back to the defaults") {
@@ -857,6 +931,7 @@ class MainActivity : Activity() {
         p == "games" -> "Las Tools"
         p == "graphics" -> "Graphics (defaults)"
         p == "framegen" -> "Frame generation (defaults)"
+        p == "epi" -> "EpiShaders (defaults)"
         p == "device" -> "Device (defaults)"
         p == "tools" -> "Tools"
         p == "diag" -> "Diagnostics"
@@ -885,6 +960,7 @@ class MainActivity : Activity() {
             page == "games" -> gamesPage(box)
             page == "graphics" -> addGraphics(box)
             page == "framegen" -> addFrameGen(box, true)
+            page == "epi" -> addEpi(box)
             page == "device" -> addDevice(box)
             page == "tools" -> toolsPage(box)
             page == "diag" -> diagPage(box)
@@ -1064,6 +1140,7 @@ class MainActivity : Activity() {
             addView(drawerItem("Games", "games"))
             addView(drawerHeader("Default settings"))
             addView(drawerItem("Graphics", "graphics"))
+            addView(drawerItem("EpiShaders", "epi"))
             addView(drawerItem("Frame generation", "framegen"))
             addView(drawerItem("Device", "device"))
             addView(drawerHeader("More"))

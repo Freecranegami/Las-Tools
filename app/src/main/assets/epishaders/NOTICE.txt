@@ -1,0 +1,5 @@
+EpiShaders bundles third-party ReShade effects. Each .fx file keeps its own header with author and licence:
+ - SweetFX / ReShade shader collections (LumaSharpen, CAS, FXAA, SMAA, Vibrance, Tonemap, Vignette, Cartoon, Levels, Curves, ...)
+ - RetroArch CRT shaders ported to ReShade FX (CRT*, zfast_crt) from the RSRetroArch collection
+ - Bloom / MagicBloom from the ReShade legacy shader collection
+The effects are compiled on the phone by the ReShade FX compiler (BSD 3-clause, Patrick Mours), see cpp/epifx/LICENSE-reshade.md.

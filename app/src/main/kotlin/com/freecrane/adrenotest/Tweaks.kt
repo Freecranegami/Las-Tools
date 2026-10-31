@@ -5,24 +5,13 @@ import java.io.File
 import android.system.Os
 import android.util.Log
 
-// Performance-related switches: light mode (no diagnostics) and CAS sharpening of the picture the game presents.
+// Performance-related switches: light mode (no diagnostics) and EpiShaders effects on the picture the game presents.
 // The choices are stored in SharedPreferences by the main app and handed to the game process through LAS_* variables.
 object Tweaks {
     private const val PREFS = "las"
 
-    class Cas(val label: String, val strength: Float)
-    val casLevels = listOf(
-        Cas("Off", 0f),
-        Cas("Light (0.25)", 0.25f),
-        Cas("Medium (0.5)", 0.5f),
-        Cas("Strong (0.8)", 0.8f),
-    )
-
     fun light(ctx: Context): Boolean = Prefs.get(ctx).getBoolean("light_mode", false)
     fun setLight(ctx: Context, on: Boolean) { Prefs.get(ctx).edit().putBoolean("light_mode", on).commit() }
-
-    fun casIndex(ctx: Context): Int = Prefs.get(ctx).getInt("cas_level", 0).coerceIn(0, casLevels.size - 1)
-    fun setCas(ctx: Context, i: Int) { Prefs.get(ctx).edit().putInt("cas_level", i).commit() }
 
     // FXAA: anti-aliasing of the picture the game presents (before the upscale when SGSR is used).
     fun fxaa(ctx: Context): Boolean = Prefs.get(ctx).getBoolean("fxaa", false)
@@ -79,7 +68,6 @@ object Tweaks {
     fun apply(ctx: Context) {
         try {
             val l = light(ctx)
-            val c = casLevels[casIndex(ctx)]
             Os.setenv("LAS_LIGHT", if (l) "1" else "0", true)
             val rw = resW(ctx); val rh = resH(ctx)
             Os.setenv("LAS_RES_W", if (rw > 0 && rh > 0) rw.toString() else "0", true)
@@ -96,8 +84,9 @@ object Tweaks {
             Os.setenv("LAS_FSR", if (up == 2) "1" else "0", true)
             Os.setenv("LAS_KEEP", if (stretch(ctx)) "0" else "1", true)
             Os.setenv("LAS_RCAS", rcasStops(rcasPercent(ctx)).toString(), true)
-            Os.setenv("LAS_CAS", if (c.strength > 0f) c.strength.toString() else "0", true)
-            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; CAS ${c.label}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; ${if (stretch(ctx)) "stretch to fit" else "keep ratio"}; FXAA ${if (fxaa(ctx)) "on" else "off"}; steady resolution ${if (drsLock(ctx)) "on" else "off"}; frame generation ${if (lsfg(ctx) && Lsfg.installed(ctx)) "on" else "off"} (${if (lsfgQuality(ctx)) "quality" else "performance"}, flow ${"%.2f".format(java.util.Locale.US, lsfgFlowSteps(ctx) * 0.05)})")
+            Os.setenv("LAS_CAS", "0", true)
+            Epi.apply(ctx)
+            Log.i("GuestHost", "tweaks: light mode ${if (l) "on" else "off"}; resolution ${if (rw > 0 && rh > 0) "${rw}x$rh" else "native"}; upscaler ${upscalers[upscaler(ctx)].substringBefore(" (")}${if (upscaler(ctx) == 2) " (RCAS ${rcasPercent(ctx)}%)" else ""}; ${if (stretch(ctx)) "stretch to fit" else "keep ratio"}; FXAA ${if (fxaa(ctx)) "on" else "off"}; steady resolution ${if (drsLock(ctx)) "on" else "off"}; frame generation ${if (lsfg(ctx) && Lsfg.installed(ctx)) "on" else "off"} (${if (lsfgQuality(ctx)) "quality" else "performance"}, flow ${"%.2f".format(java.util.Locale.US, lsfgFlowSteps(ctx) * 0.05)})")
         } catch (t: Throwable) {
             Log.w("GuestHost", "tweaks failed: $t")
         }
