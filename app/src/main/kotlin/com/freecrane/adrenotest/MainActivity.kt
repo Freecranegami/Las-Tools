@@ -45,6 +45,10 @@ object Native {
     external fun installFindClassHook(loader: ClassLoader): String
     external fun snapshot(tag: String)
     external fun installFileHooks(pkg: String, extDir: String)
+    // virtual gamepad: made-up input events for native games (handed out through the hooked AInputQueue_getEvent)
+    external fun padKey(action: Int, code: Int, device: Int): Int
+    external fun padAxes(device: Int, lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float, hx: Float, hy: Float): Int
+    external fun padStatus(): Int
 
     external fun openCustom(
         tmpDir: String, hookDir: String,

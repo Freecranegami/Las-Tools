@@ -178,13 +178,38 @@ class PadOut(private val act: Activity) {
 
     private fun abs(f: Float) = if (f < 0) -f else f
 
+    // A NativeActivity game reads its input from the system's input queue in native code, so for those the events go there.
+    private val nativeRoute = act is android.app.NativeActivity
+    private var statusLogged = false
+
+    private fun checkStatus() {
+        if (statusLogged || !nativeRoute) return
+        statusLogged = true
+        Handler(android.os.Looper.getMainLooper()).postDelayed({
+            try {
+                val st = Native.padStatus()
+                Log.i("GuestHost", "pad: native route status: game uses the hooked input queue=${st and 1 != 0}, game took a made-up event=${st and 2 != 0}")
+            } catch (t: Throwable) { Log.w("GuestHost", "pad: status failed: $t") }
+        }, 4000)
+    }
+
     private fun key(now: Long, action: Int, code: Int) {
+        if (nativeRoute) {
+            try { Native.padKey(action, code, PadDevice.ID) } catch (t: Throwable) { Log.w("GuestHost", "pad: native key failed: $t") }
+            if (++count == 1) { Log.i("GuestHost", "pad: first event sent (native route)"); checkStatus() }
+            return
+        }
         val e = KeyEvent(now, now, action, code, 0, 0, PadDevice.ID, 0, 0, InputDevice.SOURCE_GAMEPAD or InputDevice.SOURCE_KEYBOARD)
         try { act.dispatchKeyEvent(e) } catch (t: Throwable) { Log.w("GuestHost", "pad: key failed: $t") }
         if (++count == 1) Log.i("GuestHost", "pad: first event sent")
     }
 
     private fun motion(now: Long, v: FloatArray) {
+        if (nativeRoute) {
+            try { Native.padAxes(PadDevice.ID, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]) } catch (t: Throwable) { Log.w("GuestHost", "pad: native motion failed: $t") }
+            if (++count == 1) { Log.i("GuestHost", "pad: first event sent (native route)"); checkStatus() }
+            return
+        }
         val pp = MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_UNKNOWN }
         val pc = MotionEvent.PointerCoords()
         pc.setAxisValue(MotionEvent.AXIS_X, v[0]); pc.setAxisValue(MotionEvent.AXIS_Y, v[1])

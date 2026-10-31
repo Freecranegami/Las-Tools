@@ -959,10 +959,122 @@ static float ry(float v) {
     if (g_keep && g_realw > 0) { float s = touch_scale(), off = ((float)g_realh - (float)g_resh * s) * 0.5f; return (v - off) / s; }
     return v * g_resh / g_realh;
 }
-static float h_ame_x(const AInputEvent *e, size_t i) { return rx(AMotionEvent_getX(e, i)); }
-static float h_ame_y(const AInputEvent *e, size_t i) { return ry(AMotionEvent_getY(e, i)); }
-static float h_ame_rx(const AInputEvent *e, size_t i) { return rx(AMotionEvent_getRawX(e, i)); }
-static float h_ame_ry(const AInputEvent *e, size_t i) { return ry(AMotionEvent_getRawY(e, i)); }                           /* LAS_LIGHT=1: no diagnostics */
+/* ---------- Virtual gamepad: made-up input events for native games ----------
+ * A NativeActivity game reads its input straight from the system's input queue (AInputQueue_getEvent), so events pushed through
+ * Java never reach it. The on-screen controller pushes made-up key / joystick events here instead. They are handed out by the hooked
+ * AInputQueue_getEvent, and the hooked getters (AInputEvent_getType, AKeyEvent_getKeyCode, AMotionEvent_getAxisValue, ...) answer
+ * for them. A pipe is added to the game's looper so that a made-up event wakes the game's input handling like a real one would.
+ */
+#include <android/looper.h>
+#include <unistd.h>
+#include <fcntl.h>
+#define PAD_N 128
+typedef struct { int type, source, device, action, key; int64_t t, down; float ax[32]; } PadEv;
+static PadEv g_pev[PAD_N];
+static volatile unsigned g_phead = 0, g_ptail = 0;
+static int g_ppipe[2] = {-1, -1};
+static ALooper *g_ploop = NULL;
+static pthread_mutex_t g_pmu = PTHREAD_MUTEX_INITIALIZER;
+static volatile int g_pad_used = 0;                 /* the game asked for input through the queue we hook */
+static volatile int g_pad_seen = 0;
+static inline int pad_is(const void *e) { return (const PadEv *)e >= g_pev && (const PadEv *)e < g_pev + PAD_N; }
+static int64_t pad_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec; }
+static void pad_push(const PadEv *ev) {
+    pthread_mutex_lock(&g_pmu);
+    if (g_phead - g_ptail >= PAD_N - 2) g_ptail++;             /* full: drop the oldest */
+    g_pev[g_phead % PAD_N] = *ev;
+    g_phead++;
+    pthread_mutex_unlock(&g_pmu);
+    if (g_ppipe[1] >= 0) { char c = 1; (void)!write(g_ppipe[1], &c, 1); }
+    if (g_ploop) ALooper_wake(g_ploop);
+}
+static float g_axes_last[32];
+JNIEXPORT jint JNICALL Java_com_freecrane_adrenotest_Native_padKey(JNIEnv *env, jobject thiz, jint action, jint code, jint device) {
+    (void)env; (void)thiz;
+    PadEv ev; memset(&ev, 0, sizeof ev);
+    ev.type = AINPUT_EVENT_TYPE_KEY; ev.source = 0x401 /* gamepad */ | 0x101 /* keyboard */; ev.device = device; ev.action = action; ev.key = code;
+    ev.t = pad_now(); ev.down = ev.t;
+    pad_push(&ev);
+    return g_pad_seen;
+}
+JNIEXPORT jint JNICALL Java_com_freecrane_adrenotest_Native_padAxes(JNIEnv *env, jobject thiz, jint device, jfloat lx, jfloat ly, jfloat rx_, jfloat ry_,
+                                                                    jfloat lt, jfloat rt, jfloat hx, jfloat hy) {
+    (void)env; (void)thiz;
+    PadEv ev; memset(&ev, 0, sizeof ev);
+    ev.type = AINPUT_EVENT_TYPE_MOTION; ev.source = 0x01000010; ev.device = device; ev.action = AMOTION_EVENT_ACTION_MOVE;
+    ev.ax[AMOTION_EVENT_AXIS_X] = lx; ev.ax[AMOTION_EVENT_AXIS_Y] = ly;
+    ev.ax[AMOTION_EVENT_AXIS_Z] = rx_; ev.ax[AMOTION_EVENT_AXIS_RZ] = ry_;
+    ev.ax[AMOTION_EVENT_AXIS_LTRIGGER] = lt; ev.ax[AMOTION_EVENT_AXIS_BRAKE] = lt;
+    ev.ax[AMOTION_EVENT_AXIS_RTRIGGER] = rt; ev.ax[AMOTION_EVENT_AXIS_GAS] = rt;
+    ev.ax[AMOTION_EVENT_AXIS_HAT_X] = hx; ev.ax[AMOTION_EVENT_AXIS_HAT_Y] = hy;
+    ev.t = pad_now(); ev.down = ev.t;
+    pad_push(&ev);
+    return g_pad_seen;
+}
+JNIEXPORT jint JNICALL Java_com_freecrane_adrenotest_Native_padStatus(JNIEnv *env, jobject thiz) { (void)env; (void)thiz; return (g_pad_used ? 1 : 0) | (g_pad_seen ? 2 : 0); }
+
+static int h_aiq_getEvent(AInputQueue *q, AInputEvent **out) {
+    g_pad_used = 1;
+    pthread_mutex_lock(&g_pmu);
+    if (g_ptail != g_phead) {
+        *out = (AInputEvent *)&g_pev[g_ptail % PAD_N];
+        g_ptail++;
+        pthread_mutex_unlock(&g_pmu);
+        char c; (void)!read(g_ppipe[0], &c, 1);
+        if (!g_pad_seen) { g_pad_seen = 1; GLOG("pad: the game took its first made-up controller event"); }
+        return 0;
+    }
+    pthread_mutex_unlock(&g_pmu);
+    return AInputQueue_getEvent(q, out);
+}
+static int32_t h_aiq_has(AInputQueue *q) { return (g_ptail != g_phead) ? 1 : AInputQueue_hasEvents(q); }
+static int32_t h_aiq_pre(AInputQueue *q, AInputEvent *e) { return pad_is(e) ? 0 : AInputQueue_preDispatchEvent(q, e); }
+static void h_aiq_fin(AInputQueue *q, AInputEvent *e, int h) { if (!pad_is(e)) AInputQueue_finishEvent(q, e, h); }
+static void h_aiq_attach(AInputQueue *q, ALooper *l, int ident, ALooper_callbackFunc cb, void *data) {
+    AInputQueue_attachLooper(q, l, ident, cb, data);
+    if (g_ppipe[0] < 0 && pipe(g_ppipe) == 0) { fcntl(g_ppipe[0], F_SETFL, O_NONBLOCK); fcntl(g_ppipe[1], F_SETFL, O_NONBLOCK); }
+    if (g_ppipe[0] >= 0) {
+        ALooper_addFd(l, g_ppipe[0], ident, ALOOPER_EVENT_INPUT, cb, data);
+        g_ploop = l;
+        GLOG("pad: the game's input queue was found (looper id %d, %s)", ident, cb ? "callback" : "polled");
+    }
+}
+static void h_aiq_detach(AInputQueue *q) {
+    AInputQueue_detachLooper(q);
+    if (g_ploop && g_ppipe[0] >= 0) { ALooper_removeFd(g_ploop, g_ppipe[0]); g_ploop = NULL; }
+}
+static int32_t h_aie_type(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->type : AInputEvent_getType(e); }
+static int32_t h_aie_dev(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->device : AInputEvent_getDeviceId(e); }
+static int32_t h_aie_src(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->source : AInputEvent_getSource(e); }
+static int32_t h_ake_action(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->action : AKeyEvent_getAction(e); }
+static int32_t h_ake_flags(const AInputEvent *e) { return pad_is(e) ? 0 : AKeyEvent_getFlags(e); }
+static int32_t h_ake_key(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->key : AKeyEvent_getKeyCode(e); }
+static int32_t h_ake_scan(const AInputEvent *e) { return pad_is(e) ? 0 : AKeyEvent_getScanCode(e); }
+static int32_t h_ake_meta(const AInputEvent *e) { return pad_is(e) ? 0 : AKeyEvent_getMetaState(e); }
+static int32_t h_ake_rep(const AInputEvent *e) { return pad_is(e) ? 0 : AKeyEvent_getRepeatCount(e); }
+static int64_t h_ake_down(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->down : AKeyEvent_getDownTime(e); }
+static int64_t h_ake_time(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->t : AKeyEvent_getEventTime(e); }
+static int32_t h_ame_action(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->action : AMotionEvent_getAction(e); }
+static int32_t h_ame_flags(const AInputEvent *e) { return pad_is(e) ? 0 : AMotionEvent_getFlags(e); }
+static int32_t h_ame_meta(const AInputEvent *e) { return pad_is(e) ? 0 : AMotionEvent_getMetaState(e); }
+static int32_t h_ame_btn(const AInputEvent *e) { return pad_is(e) ? 0 : AMotionEvent_getButtonState(e); }
+static int32_t h_ame_edge(const AInputEvent *e) { return pad_is(e) ? 0 : AMotionEvent_getEdgeFlags(e); }
+static int64_t h_ame_down(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->down : AMotionEvent_getDownTime(e); }
+static int64_t h_ame_time(const AInputEvent *e) { return pad_is(e) ? ((const PadEv *)e)->t : AMotionEvent_getEventTime(e); }
+static size_t h_ame_count(const AInputEvent *e) { return pad_is(e) ? 1 : AMotionEvent_getPointerCount(e); }
+static int32_t h_ame_pid(const AInputEvent *e, size_t i) { return pad_is(e) ? 0 : AMotionEvent_getPointerId(e, i); }
+static int32_t h_ame_tool(const AInputEvent *e, size_t i) { return pad_is(e) ? 0 : AMotionEvent_getToolType(e, i); }
+static float h_ame_axis(const AInputEvent *e, int32_t axis, size_t i) { return pad_is(e) ? ((axis >= 0 && axis < 32 && i == 0) ? ((const PadEv *)e)->ax[axis] : 0.0f) : AMotionEvent_getAxisValue(e, axis, i); }
+static float h_ame_press(const AInputEvent *e, size_t i) { return pad_is(e) ? 0.0f : AMotionEvent_getPressure(e, i); }
+static float h_ame_size(const AInputEvent *e, size_t i) { return pad_is(e) ? 0.0f : AMotionEvent_getSize(e, i); }
+static size_t h_ame_hsize(const AInputEvent *e) { return pad_is(e) ? 0 : AMotionEvent_getHistorySize(e); }
+static float h_ame_xp(const AInputEvent *e) { return pad_is(e) ? 1.0f : AMotionEvent_getXPrecision(e); }
+static float h_ame_yp(const AInputEvent *e) { return pad_is(e) ? 1.0f : AMotionEvent_getYPrecision(e); }
+
+static float h_ame_x(const AInputEvent *e, size_t i) { return pad_is(e) ? ((const PadEv *)e)->ax[AMOTION_EVENT_AXIS_X] : rx(AMotionEvent_getX(e, i)); }
+static float h_ame_y(const AInputEvent *e, size_t i) { return pad_is(e) ? ((const PadEv *)e)->ax[AMOTION_EVENT_AXIS_Y] : ry(AMotionEvent_getY(e, i)); }
+static float h_ame_rx(const AInputEvent *e, size_t i) { return pad_is(e) ? 0.0f : rx(AMotionEvent_getRawX(e, i)); }
+static float h_ame_ry(const AInputEvent *e, size_t i) { return pad_is(e) ? 0.0f : ry(AMotionEvent_getRawY(e, i)); }                           /* LAS_LIGHT=1: no diagnostics */
 #define FH_SEEN 2048
 static volatile uint32_t g_seen[FH_SEEN];
 static volatile int g_fail_logged = 0, g_ok_logged = 0;
@@ -1168,6 +1280,16 @@ static const struct { const char *name; void *fn; } fh_tab[] = {
     {"AAssetManager_open", h_aam_open},
     {"ANativeWindow_getWidth", h_anw_w}, {"ANativeWindow_getHeight", h_anw_h},
     {"AMotionEvent_getX", h_ame_x}, {"AMotionEvent_getY", h_ame_y}, {"AMotionEvent_getRawX", h_ame_rx}, {"AMotionEvent_getRawY", h_ame_ry},
+    {"AInputQueue_getEvent", h_aiq_getEvent}, {"AInputQueue_hasEvents", h_aiq_has}, {"AInputQueue_preDispatchEvent", h_aiq_pre},
+    {"AInputQueue_finishEvent", h_aiq_fin}, {"AInputQueue_attachLooper", h_aiq_attach}, {"AInputQueue_detachLooper", h_aiq_detach},
+    {"AInputEvent_getType", h_aie_type}, {"AInputEvent_getDeviceId", h_aie_dev}, {"AInputEvent_getSource", h_aie_src},
+    {"AKeyEvent_getAction", h_ake_action}, {"AKeyEvent_getFlags", h_ake_flags}, {"AKeyEvent_getKeyCode", h_ake_key}, {"AKeyEvent_getScanCode", h_ake_scan},
+    {"AKeyEvent_getMetaState", h_ake_meta}, {"AKeyEvent_getRepeatCount", h_ake_rep}, {"AKeyEvent_getDownTime", h_ake_down}, {"AKeyEvent_getEventTime", h_ake_time},
+    {"AMotionEvent_getAction", h_ame_action}, {"AMotionEvent_getFlags", h_ame_flags}, {"AMotionEvent_getMetaState", h_ame_meta},
+    {"AMotionEvent_getButtonState", h_ame_btn}, {"AMotionEvent_getEdgeFlags", h_ame_edge}, {"AMotionEvent_getDownTime", h_ame_down},
+    {"AMotionEvent_getEventTime", h_ame_time}, {"AMotionEvent_getPointerCount", h_ame_count}, {"AMotionEvent_getPointerId", h_ame_pid},
+    {"AMotionEvent_getToolType", h_ame_tool}, {"AMotionEvent_getAxisValue", h_ame_axis}, {"AMotionEvent_getPressure", h_ame_press},
+    {"AMotionEvent_getSize", h_ame_size}, {"AMotionEvent_getHistorySize", h_ame_hsize}, {"AMotionEvent_getXPrecision", h_ame_xp}, {"AMotionEvent_getYPrecision", h_ame_yp},
     {"open", h_open}, {"__open_2", h_open2}, {"openat", h_openat}, {"__openat_2", h_openat2},
     {"stat", h_stat}, {"lstat", h_lstat}, {"fstatat", h_fstatat}, {"access", h_access},
     {"fopen", h_fopen}, {"opendir", h_opendir}, {NULL, NULL}
