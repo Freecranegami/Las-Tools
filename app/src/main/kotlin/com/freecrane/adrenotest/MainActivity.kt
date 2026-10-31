@@ -948,9 +948,18 @@ class MainActivity : Activity() {
     }
 
     private fun refreshPage() {
+        ui.removeCallbacks(refreshRunnable)
         val y = pageScroll?.scrollY ?: 0
         buildPage()
-        pageScroll?.post { pageScroll?.scrollTo(0, y) }
+        val sc = pageScroll ?: return
+        // put the scroll position back before the first frame is drawn, so the page doesn't flash at the top
+        sc.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                sc.viewTreeObserver.removeOnPreDrawListener(this)
+                sc.scrollTo(0, y)
+                return true
+            }
+        })
     }
 
     private fun buildPage() {
