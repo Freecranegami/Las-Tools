@@ -22,6 +22,7 @@
         </activity>
 
         <activity android:name=".FileManagerActivity" android:exported="false" android:label="File manager" />
+        <activity android:name=".PadEditorActivity" android:exported="false" android:screenOrientation="sensorLandscape" android:theme="@android:style/Theme.NoTitleBar.Fullscreen" />
 
         <activity
             android:name=".GuestActivity"

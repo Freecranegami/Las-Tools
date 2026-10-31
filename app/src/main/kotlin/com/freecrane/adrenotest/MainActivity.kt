@@ -807,6 +807,36 @@ class MainActivity : Activity() {
         box.addView(reset)
     }
 
+    // ----- virtual gamepad (an Xbox 360 controller on the screen) -----
+
+    private fun addPad(b: LinearLayout) {
+        header(b, "Virtual gamepad")
+        toggle(b, "On-screen Xbox 360 controller", "The game sees a controller plugged in; the buttons are drawn over the game",
+            { Pad.on(this) }) { Pad.setOn(this, !Pad.on(this)); outView.text = "Virtual gamepad ${if (Pad.on(this)) "ON" else "OFF"}. Applies the next time the game starts."; refreshPage() }
+        action(b, "Edit layout", "Move, resize and hide the controls") {
+            startActivity(Intent(this, PadEditorActivity::class.java).putExtra("pkg", Prefs.scope))
+        }
+        action(b, "Transparency", "${Pad.opacity(this)} % visible") { choosePadOpacity() }
+        toggle(b, "Vibrate on press", "A tiny tick when a button is pressed", { Pad.haptics(this) }) { Pad.setHaptics(this, !Pad.haptics(this)); refreshPage() }
+        action(b, "Reset layout", "Back to the standard Xbox layout") { Pad.resetLayout(this); outView.text = "Layout reset."; refreshPage() }
+    }
+
+    private fun choosePadOpacity() {
+        val bar = android.widget.SeekBar(this).apply { max = 85; progress = Pad.opacity(this@MainActivity) - 15 }
+        val label = TextView(this).apply { setPadding(dp(20), dp(16), dp(20), 0) }
+        fun show(p: Int) { label.text = "${p + 15} % visible" }
+        show(bar.progress)
+        bar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, u: Boolean) { show(p) }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) { }
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) { }
+        })
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(label); addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(dp(16), dp(8), dp(16), dp(8)) }) }
+        AlertDialog.Builder(this).setTitle("Controller transparency").setView(box)
+            .setPositiveButton("Save") { _, _ -> Pad.setOpacity(this, bar.progress + 15); refreshPage() }
+            .setNegativeButton("Cancel", null).show()
+    }
+
     private fun addDevice(b: LinearLayout) {
         header(b, "Device")
         action(b, "GPU spoof", GpuSpoof.presets[GpuSpoof.index(this)].label) { chooseGpu(outView) }
@@ -887,6 +917,7 @@ class MainActivity : Activity() {
         box.addView(label("Changes here affect only this game. Anything you never change here follows the defaults from the menu.", 12f, cSub).apply { setPadding(dp(4), 0, dp(4), dp(8)) })
         addGraphics(box)
         addEpi(box)
+        addPad(box)
         addFrameGen(box, false)
         addDevice(box)
         action(box, "Reset this game's settings", "Go back to the defaults") {
@@ -933,6 +964,7 @@ class MainActivity : Activity() {
         p == "graphics" -> "Graphics (defaults)"
         p == "framegen" -> "Frame generation (defaults)"
         p == "epi" -> "EpiShaders (defaults)"
+        p == "pad" -> "Controls (defaults)"
         p == "device" -> "Device (defaults)"
         p == "tools" -> "Tools"
         p == "diag" -> "Diagnostics"
@@ -971,6 +1003,7 @@ class MainActivity : Activity() {
             page == "graphics" -> addGraphics(box)
             page == "framegen" -> addFrameGen(box, true)
             page == "epi" -> addEpi(box)
+            page == "pad" -> addPad(box)
             page == "device" -> addDevice(box)
             page == "tools" -> toolsPage(box)
             page == "diag" -> diagPage(box)
@@ -1151,6 +1184,7 @@ class MainActivity : Activity() {
             addView(drawerHeader("Default settings"))
             addView(drawerItem("Graphics", "graphics"))
             addView(drawerItem("EpiShaders", "epi"))
+            addView(drawerItem("Controls", "pad"))
             addView(drawerItem("Frame generation", "framegen"))
             addView(drawerItem("Device", "device"))
             addView(drawerHeader("More"))

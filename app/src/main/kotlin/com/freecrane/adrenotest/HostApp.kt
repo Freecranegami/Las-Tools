@@ -93,6 +93,7 @@ private object GuestSwap : Application.ActivityLifecycleCallbacks {
     override fun onActivityStarted(activity: Activity) = life("started", activity)
     override fun onActivityResumed(activity: Activity) {
         life("resumed", activity)
+        if (activity is GuestActivity || activity is GuestNativeActivity || activity.javaClass.classLoader is GuestLoader) PadOverlay.attach(activity)
         if (activity.javaClass.classLoader !is GuestLoader || watched.contains(activity)) return
         watched.add(activity)
         try {
